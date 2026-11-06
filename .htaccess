@@ -1,0 +1,28 @@
+# Security Configuration (Apache 2.4)
+
+# Prevent directory listing
+Options -Indexes
+
+# Prevent access to sensitive and non-web files
+<FilesMatch "(^\.|\.(sql|log|md|txt|example|conf|bak|tgz|zip)$)">
+    Require all denied
+</FilesMatch>
+
+# Include-only PHP files
+<FilesMatch "^(config|config\.local|config\.local\.example|db|functions)\.php$">
+    Require all denied
+</FilesMatch>
+
+# Folders that must never be served
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^(uploads|logs|includes|scripts|migrations|tests|deploy)(/|$) - [F,L]
+</IfModule>
+
+# Set charset
+AddDefaultCharset UTF-8
+
+# Headers for static files; PHP pages set their full header list in functions.php
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+</IfModule>

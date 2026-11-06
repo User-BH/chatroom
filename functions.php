@@ -3,7 +3,7 @@
  * ===================================================
  * ChatRoom - توابع کمکی و امنیتی
  * ===================================================
- * نسخه: 2.0
+ * نسخه: 2.1
  * سازگار با: PHP 7.4+
  * استفاده از: PDO
  */
@@ -11,51 +11,80 @@
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/db.php';
 
+// هش ساختگی برای نام‌های کاربری ناموجود تا زمان پاسخ، وجود حساب را لو ندهد
+const DUMMY_PASSWORD_HASH = '$2y$12$fae45vreC3u6c1.VACgOauSqitf15ard7/g0qub7mHY0EzviIGnye';
+
 // ==============================================
 // توابع امنیتی Session
 // ==============================================
 
 /**
+ * آیا درخواست روی HTTPS آمده است؟
+ * @return bool
+ */
+function isHttps() {
+    if (!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off') {
+        return true;
+    }
+    return isTrustedProxy($_SERVER['REMOTE_ADDR'] ?? '')
+        && strtolower((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')) === 'https';
+}
+
+/**
  * شروع امن session
  */
 function secureSessionStart() {
-    if (session_status() === PHP_SESSION_NONE) {
-        // تنظیمات امنیتی session
-        ini_set('session.cookie_httponly', '1');
-        ini_set('session.cookie_secure', isset($_SERVER['HTTPS']) ? '1' : '0');
-        ini_set('session.use_strict_mode', '1');
-        ini_set('session.cookie_samesite', 'Strict');
-        ini_set('session.gc_maxlifetime', (string)SESSION_LIFETIME);
-        
-        session_name(SESSION_NAME);
-        session_start();
-        
-        // بازسازی session ID برای جلوگیری از session fixation
-        if (!isset($_SESSION['initiated'])) {
-            session_regenerate_id(true);
-            $_SESSION['initiated'] = true;
-            $_SESSION['created_at'] = time();
+    if (PHP_SAPI === 'cli' || session_status() !== PHP_SESSION_NONE) {
+        return;
+    }
+
+    // تنظیمات امنیتی session
+    ini_set('session.cookie_httponly', '1');
+    ini_set('session.cookie_secure', isHttps() ? '1' : '0');
+    ini_set('session.use_strict_mode', '1');
+    ini_set('session.use_only_cookies', '1');
+    ini_set('session.use_trans_sid', '0');
+    ini_set('session.cookie_samesite', 'Strict');
+    ini_set('session.gc_maxlifetime', (string)SESSION_LIFETIME);
+
+    session_name(SESSION_NAME);
+    session_start();
+
+    $now = time();
+
+    // بازسازی session ID برای جلوگیری از session fixation
+    if (!isset($_SESSION['initiated'])) {
+        session_regenerate_id(true);
+        $_SESSION['initiated'] = true;
+        $_SESSION['created_at'] = $now;
+        $_SESSION['last_activity'] = $now;
+    }
+
+    // بررسی انقضای session (بیکاری یا عمر کل)
+    $idleExpired = $now - (int)($_SESSION['last_activity'] ?? $now) > SESSION_LIFETIME;
+    $absoluteExpired = $now - (int)($_SESSION['created_at'] ?? $now) > SESSION_ABSOLUTE_LIFETIME;
+    if ($idleExpired || $absoluteExpired) {
+        sessionDestroy();
+        secureSessionStart();
+        return;
+    }
+    $_SESSION['last_activity'] = $now;
+
+    // Fingerprint برای جلوگیری از session hijacking
+    $fingerprint = hash(
+        'sha256',
+        ($_SERVER['HTTP_USER_AGENT'] ?? '') . ($_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? '')
+    );
+
+    if (!isset($_SESSION['fingerprint'])) {
+        $_SESSION['fingerprint'] = $fingerprint;
+    } elseif (!hash_equals($_SESSION['fingerprint'], $fingerprint)) {
+        sessionDestroy();
+        if (defined('API_REQUEST')) {
+            jsonError('لطفاً دوباره وارد شوید.', 401);
         }
-        
-        // بررسی انقضای session
-        if (isset($_SESSION['created_at']) && (time() - $_SESSION['created_at'] > SESSION_LIFETIME)) {
-            sessionDestroy();
-            secureSessionStart();
-        }
-        
-        // Fingerprint برای جلوگیری از session hijacking
-        $fingerprint = md5(
-            ($_SERVER['HTTP_USER_AGENT'] ?? '') . 
-            ($_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? '')
-        );
-        
-        if (!isset($_SESSION['fingerprint'])) {
-            $_SESSION['fingerprint'] = $fingerprint;
-        } elseif ($_SESSION['fingerprint'] !== $fingerprint) {
-            sessionDestroy();
-            header('Location: login.php?error=session');
-            exit();
-        }
+        header('Location: login.php?error=session');
+        exit();
     }
 }
 
@@ -64,15 +93,15 @@ function secureSessionStart() {
  */
 function sessionDestroy() {
     $_SESSION = [];
-    if (ini_get("session.use_cookies")) {
+    if (ini_get("session.use_cookies") && !headers_sent()) {
         $params = session_get_cookie_params();
         setcookie(
-            session_name(), 
-            '', 
+            session_name(),
+            '',
             time() - 42000,
-            $params["path"], 
+            $params["path"],
             $params["domain"],
-            $params["secure"], 
+            $params["secure"],
             $params["httponly"]
         );
     }
@@ -81,39 +110,65 @@ function sessionDestroy() {
     }
 }
 
+/**
+ * بعد از تایید هویت: شناسه session و توکن CSRF عوض می‌شوند
+ */
+function rotateSessionAfterLogin() {
+    session_regenerate_id(true);
+    unset($_SESSION[CSRF_TOKEN_NAME]);
+    $_SESSION['created_at'] = time();
+    $_SESSION['last_activity'] = time();
+}
+
+/**
+ * پاک کردن وضعیت ورود کاربر بدون دست زدن به ورود ادمین در همان مرورگر
+ */
+function clearUserSession() {
+    unset(
+        $_SESSION['user_id'],
+        $_SESSION['username'],
+        $_SESSION['name'],
+        $_SESSION['room_id'],
+        $_SESSION['session_version'],
+        $_SESSION['login_time'],
+        $_SESSION['pending_login']
+    );
+}
+
 // ==============================================
 // توابع CSRF
 // ==============================================
 
 /**
  * تولید توکن CSRF
+ * توکن تا پایان session ثابت است چون صفحه چت ساعت‌ها باز می‌ماند
  * @return string
  */
 function generateCSRFToken() {
-    if (empty($_SESSION[CSRF_TOKEN_NAME]) || empty($_SESSION['csrf_token_time']) || 
-        (time() - $_SESSION['csrf_token_time'] > CSRF_TOKEN_EXPIRY)) {
+    if (empty($_SESSION[CSRF_TOKEN_NAME])) {
         $_SESSION[CSRF_TOKEN_NAME] = bin2hex(random_bytes(32));
-        $_SESSION['csrf_token_time'] = time();
     }
     return $_SESSION[CSRF_TOKEN_NAME];
 }
 
 /**
  * اعتبارسنجی توکن CSRF
- * @param string|null $token
+ * @param mixed $token
  * @return bool
  */
 function validateCSRFToken($token) {
-    if (empty($_SESSION[CSRF_TOKEN_NAME]) || empty($token)) {
+    if (empty($_SESSION[CSRF_TOKEN_NAME]) || !is_string($token) || $token === '') {
         return false;
     }
-    
-    // بررسی انقضا
-    if (empty($_SESSION['csrf_token_time']) || (time() - $_SESSION['csrf_token_time'] > CSRF_TOKEN_EXPIRY)) {
-        return false;
-    }
-    
     return hash_equals($_SESSION[CSRF_TOKEN_NAME], $token);
+}
+
+/**
+ * توکن CSRF ارسال‌شده در درخواست (هدر یا فیلد فرم)
+ * @return mixed
+ */
+function requestCSRFToken() {
+    return $_SERVER['HTTP_X_CSRF_TOKEN'] ?? ($_POST[CSRF_TOKEN_NAME] ?? '');
 }
 
 /**
@@ -129,31 +184,49 @@ function csrfField() {
 // ==============================================
 
 /**
- * بررسی محدودیت تلاش ورود
+ * تعداد تلاش‌های ناموفق در پنجره زمانی
+ * @param string $type
+ * @param string|null $ip
+ * @param string|null $username
+ * @return int
+ */
+function countFailedLogins($type, $ip = null, $username = null) {
+    $sql = "
+        SELECT COUNT(*) AS attempts
+        FROM login_attempts
+        WHERE attempt_type = :type
+        AND success = 0
+        AND attempted_at > DATE_SUB(NOW(), INTERVAL :seconds SECOND)
+    ";
+    $params = [':type' => $type, ':seconds' => LOGIN_LOCKOUT_TIME];
+
+    if ($ip !== null) {
+        $sql .= " AND ip_address = :ip";
+        $params[':ip'] = $ip;
+    }
+    if ($username !== null) {
+        $sql .= " AND username = :username";
+        $params[':username'] = $username;
+    }
+
+    $stmt = getDB()->prepare($sql);
+    $stmt->execute($params);
+    return (int)$stmt->fetch()['attempts'];
+}
+
+/**
+ * بررسی مسدود بودن تلاش ورود
+ * محدودیت‌ها سمت سرور هستند و با پاک کردن کوکی یا جعل هدر دور زده نمی‌شوند.
+ * قفل کامل حساب عمداً نداریم چون هر کسی می‌توانست با چند رمز غلط، دیگران را بیرون کند.
  * @param string $ip
+ * @param string $username
  * @param string $type
  * @return bool
  */
-function checkLoginAttempts($ip, $type = 'user') {
-    $db = getDB();
-    
-    $stmt = $db->prepare("
-        SELECT COUNT(*) as attempts 
-        FROM login_attempts 
-        WHERE ip_address = :ip 
-        AND attempt_type = :type
-        AND success = 0 
-        AND attempted_at > DATE_SUB(NOW(), INTERVAL :seconds SECOND)
-    ");
-    
-    $stmt->execute([
-        ':ip' => $ip,
-        ':type' => $type,
-        ':seconds' => LOGIN_LOCKOUT_TIME
-    ]);
-    
-    $result = $stmt->fetch();
-    return $result['attempts'] < MAX_LOGIN_ATTEMPTS;
+function isLoginBlocked($ip, $username, $type = 'user') {
+    return countFailedLogins($type, $ip, $username) >= MAX_LOGIN_ATTEMPTS
+        || countFailedLogins($type, $ip) >= MAX_LOGIN_ATTEMPTS_PER_IP
+        || countFailedLogins($type, null, $username) >= MAX_LOGIN_ATTEMPTS_PER_USER;
 }
 
 /**
@@ -165,22 +238,100 @@ function checkLoginAttempts($ip, $type = 'user') {
  */
 function logLoginAttempt($ip, $username, $type, $success) {
     $db = getDB();
-    
+
+    if ($success) {
+        // ورود موفق شمارنده همین کاربر روی همین IP را صفر می‌کند
+        $stmt = $db->prepare("
+            DELETE FROM login_attempts
+            WHERE ip_address = :ip AND username = :username AND attempt_type = :type AND success = 0
+        ");
+        $stmt->execute([':ip' => $ip, ':username' => $username, ':type' => $type]);
+    }
+
     $stmt = $db->prepare("
-        INSERT INTO login_attempts (ip_address, username, attempt_type, success) 
+        INSERT INTO login_attempts (ip_address, username, attempt_type, success)
         VALUES (:ip, :username, :type, :success)
     ");
-    
+
     $stmt->execute([
         ':ip' => $ip,
         ':username' => $username,
         ':type' => $type,
         ':success' => $success ? 1 : 0
     ]);
+
+    // پاکسازی بدون وابستگی به cron یا Event Scheduler
+    if (mt_rand(1, 100) === 1) {
+        cleanupOldRecords();
+    }
+}
+
+/**
+ * حذف رکوردهای قدیمی لاگ
+ */
+function cleanupOldRecords() {
+    $db = getDB();
+    $stmt = $db->prepare("DELETE FROM login_attempts WHERE attempted_at < DATE_SUB(NOW(), INTERVAL :seconds SECOND)");
+    $stmt->execute([':seconds' => 30 * 86400]);
+    $stmt = $db->prepare("DELETE FROM security_logs WHERE created_at < DATE_SUB(NOW(), INTERVAL :seconds SECOND)");
+    $stmt->execute([':seconds' => 90 * 86400]);
+}
+
+/**
+ * تایید نام کاربری و رمز عبور کاربر یا ادمین
+ * پیام خطا برای کاربر ناموجود، غیرفعال و رمز اشتباه یکسان است
+ * @param string $type user|admin
+ * @param string $username
+ * @param string $password
+ * @return array ['account' => array|null, 'error' => string]
+ */
+function attemptLogin($type, $username, $password) {
+    $ip = getClientIP();
+    $genericError = 'نام کاربری یا رمز عبور اشتباه است.';
+
+    if ($username === '' || $password === '') {
+        return ['account' => null, 'error' => 'لطفاً نام کاربری و رمز عبور را وارد کنید.'];
+    }
+
+    // ستون username حداکثر 50 کاراکتر است؛ چنین نامی اصلاً وجود ندارد
+    if (mb_strlen($username, 'UTF-8') > 50 || !mb_check_encoding($username, 'UTF-8')) {
+        return ['account' => null, 'error' => $genericError];
+    }
+
+    if (isLoginBlocked($ip, $username, $type)) {
+        logSecurityEvent($type . '_login_blocked', null, null, ['username' => $username]);
+        return [
+            'account' => null,
+            'error' => 'تعداد تلاش‌های ورود بیش از حد مجاز است. لطفاً ' . ceil(LOGIN_LOCKOUT_TIME / 60) . ' دقیقه صبر کنید.'
+        ];
+    }
+
+    $table = $type === 'admin' ? 'admins' : 'users';
+    $stmt = getDB()->prepare("SELECT * FROM {$table} WHERE username = :username");
+    $stmt->execute([':username' => $username]);
+    $account = $stmt->fetch();
+
+    // برای کاربر ناموجود هم bcrypt اجرا می‌شود تا زمان پاسخ یکسان بماند
+    $passwordOk = verifyPassword($password, $account ? $account['password'] : DUMMY_PASSWORD_HASH);
+
+    if (!$account || !$passwordOk || !$account['is_active']) {
+        logLoginAttempt($ip, $username, $type, false);
+        logSecurityEvent(
+            $type . '_login_failed',
+            ($account && $type === 'user') ? $account['id'] : null,
+            ($account && $type === 'admin') ? $account['id'] : null,
+            ['username' => $username]
+        );
+        return ['account' => null, 'error' => $genericError];
+    }
+
+    logLoginAttempt($ip, $username, $type, true);
+    return ['account' => $account, 'error' => ''];
 }
 
 /**
  * Rate Limiting با Session
+ * فقط برای کاربر واردشده مناسب است؛ برای صفحه ورود از isLoginBlocked استفاده کنید
  * @param string $key
  * @param int $maxAttempts
  * @param int $timeWindow
@@ -188,48 +339,59 @@ function logLoginAttempt($ip, $username, $type, $success) {
  */
 function checkRateLimit($key, $maxAttempts = 10, $timeWindow = 60) {
     $cacheKey = 'rate_limit_' . md5($key);
-    
+
     if (!isset($_SESSION[$cacheKey])) {
         $_SESSION[$cacheKey] = ['count' => 1, 'start' => time()];
         return true;
     }
-    
+
     $data = $_SESSION[$cacheKey];
-    
+
     if (time() - $data['start'] > $timeWindow) {
         $_SESSION[$cacheKey] = ['count' => 1, 'start' => time()];
         return true;
     }
-    
+
     if ($data['count'] >= $maxAttempts) {
         return false;
     }
-    
+
     $_SESSION[$cacheKey]['count']++;
     return true;
 }
 
 /**
+ * آیا این IP یکی از پروکسی‌های مورد اعتماد است؟
+ * @param string $ip
+ * @return bool
+ */
+function isTrustedProxy($ip) {
+    if ($ip === '' || TRUSTED_PROXIES === '') {
+        return false;
+    }
+    return in_array($ip, array_map('trim', explode(',', TRUSTED_PROXIES)), true);
+}
+
+/**
  * دریافت IP واقعی کاربر
+ * هدرهای پروکسی فقط وقتی خوانده می‌شوند که درخواست از پروکسی مورد اعتماد آمده باشد،
+ * وگرنه هر کسی می‌توانست با جعل X-Forwarded-For محدودیت ورود را دور بزند
  * @return string
  */
 function getClientIP() {
-    $headers = ['HTTP_CF_CONNECTING_IP', 'HTTP_X_FORWARDED_FOR', 'HTTP_X_REAL_IP', 'HTTP_CLIENT_IP', 'REMOTE_ADDR'];
-    
-    foreach ($headers as $header) {
-        if (!empty($_SERVER[$header])) {
-            $ip = $_SERVER[$header];
-            // اگر چند IP باشد (پشت پروکسی)
-            if (strpos($ip, ',') !== false) {
-                $ip = trim(explode(',', $ip)[0]);
-            }
-            if (filter_var($ip, FILTER_VALIDATE_IP)) {
+    $remote = $_SERVER['REMOTE_ADDR'] ?? '';
+
+    if (isTrustedProxy($remote) && !empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+        // از راست به چپ: اولین آدرسی که پروکسی ما نیست، آدرس واقعی است
+        $chain = array_reverse(array_map('trim', explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])));
+        foreach ($chain as $ip) {
+            if (filter_var($ip, FILTER_VALIDATE_IP) && !isTrustedProxy($ip)) {
                 return $ip;
             }
         }
     }
-    
-    return '0.0.0.0';
+
+    return filter_var($remote, FILTER_VALIDATE_IP) ? $remote : '0.0.0.0';
 }
 
 // ==============================================
@@ -238,22 +400,29 @@ function getClientIP() {
 
 /**
  * پاکسازی رشته برای نمایش (XSS Prevention)
- * @param string $string
+ * @param mixed $string
  * @return string
  */
 function sanitize($string) {
-    return htmlspecialchars(trim($string), ENT_QUOTES, 'UTF-8');
+    return htmlspecialchars(trim((string)$string), ENT_QUOTES, 'UTF-8');
 }
 
 /**
- * پاکسازی ورودی برای ذخیره در دیتابیس
- * @param string $data
+ * پاکسازی ورودی متنی؛ آرایه (مثل username[]=x) به رشته خالی تبدیل می‌شود
+ * @param mixed $data
  * @return string
  */
 function cleanInput($data) {
-    $data = trim($data);
-    $data = stripslashes($data);
-    return $data;
+    return is_string($data) ? trim($data) : '';
+}
+
+/**
+ * خواندن یک فیلد متنی از POST
+ * @param string $key
+ * @return string
+ */
+function postString($key) {
+    return isset($_POST[$key]) && is_string($_POST[$key]) ? $_POST[$key] : '';
 }
 
 /**
@@ -262,8 +431,30 @@ function cleanInput($data) {
  * @return int|false
  */
 function validatePositiveInt($value) {
+    if (!is_scalar($value)) {
+        return false;
+    }
     $value = filter_var($value, FILTER_VALIDATE_INT);
     return ($value !== false && $value > 0) ? $value : false;
+}
+
+/**
+ * اعتبارسنجی متن پیام
+ * @param string $text
+ * @return string خطا یا رشته خالی
+ */
+function validateMessageText($text) {
+    // مقایسه با '' و نه empty، چون پیام «0» یک پیام معتبر است
+    if ($text === '') {
+        return 'پیام نمی‌تواند خالی باشد.';
+    }
+    if (!mb_check_encoding($text, 'UTF-8')) {
+        return 'متن پیام نامعتبر است.';
+    }
+    if (mb_strlen($text, 'UTF-8') > MAX_MESSAGE_LENGTH) {
+        return 'پیام بیش از حد طولانی است (حداکثر ' . MAX_MESSAGE_LENGTH . ' کاراکتر).';
+    }
+    return '';
 }
 
 // ==============================================
@@ -306,11 +497,138 @@ function requireUserLogin() {
 
 /**
  * نیاز به ورود ادمین
+ * حساب ادمین در هر درخواست بررسی می‌شود تا غیرفعال‌سازی فوراً اثر کند
  */
 function requireAdminLogin() {
     if (!isAdminLoggedIn()) {
         redirect('admin-login.php');
     }
+
+    $stmt = getDB()->prepare("SELECT session_version FROM admins WHERE id = :id AND is_active = 1");
+    $stmt->execute([':id' => $_SESSION['admin_id']]);
+    $admin = $stmt->fetch();
+    if (!$admin || (int)$admin['session_version'] !== (int)($_SESSION['admin_session_version'] ?? -1)) {
+        unset($_SESSION['admin_id'], $_SESSION['admin_username'], $_SESSION['admin_session_version']);
+        redirect('admin-login.php');
+    }
+}
+
+/**
+ * عضویت معتبر: کاربر فعال، روم فعال و عضویت موجود
+ * @param int $userId
+ * @param int $roomId
+ * @return array|null
+ */
+function getActiveMembership($userId, $roomId) {
+    $stmt = getDB()->prepare("
+        SELECT ur.role, ur.is_muted, ur.muted_until, u.session_version
+        FROM users_rooms ur
+        JOIN users u ON u.id = ur.user_id AND u.is_active = 1
+        JOIN rooms r ON r.id = ur.room_id AND r.is_active = 1
+        WHERE ur.user_id = :user_id AND ur.room_id = :room_id
+    ");
+    $stmt->execute([':user_id' => $userId, ':room_id' => $roomId]);
+    $membership = $stmt->fetch();
+    return $membership ?: null;
+}
+
+/**
+ * عضویت کاربر فعلی session؛ اگر رمز عبور عوض شده باشد این session دیگر معتبر نیست
+ * @return array|null
+ */
+function getCurrentUserMembership() {
+    if (!isUserLoggedIn()) {
+        return null;
+    }
+    $membership = getActiveMembership((int)$_SESSION['user_id'], (int)$_SESSION['room_id']);
+    if (!$membership || (int)$membership['session_version'] !== (int)($_SESSION['session_version'] ?? -1)) {
+        return null;
+    }
+    return $membership;
+}
+
+/**
+ * آیا عضو در حال حاضر ساکت شده است؟
+ * @param array $membership
+ * @return bool
+ */
+function isMembershipMuted($membership) {
+    if (!$membership['is_muted']) {
+        return false;
+    }
+    return $membership['muted_until'] === null || strtotime($membership['muted_until']) > time();
+}
+
+/**
+ * کنترل مشترک تمام APIهای چت. فقط وقتی برمی‌گردد که درخواست مجاز باشد.
+ * غیرفعال شدن کاربر یا روم و حذف از روم، از درخواست بعدی اثر می‌کند.
+ * @param string $method
+ * @param string $rateKey
+ * @param int $rateMax
+ * @param int $rateWindow
+ * @return array ['user_id', 'room_id', 'membership']
+ */
+function requireChatApiAccess($method, $rateKey, $rateMax, $rateWindow = 60) {
+    if ($_SERVER['REQUEST_METHOD'] !== $method) {
+        jsonError('متد نامعتبر است.', 405);
+    }
+    if (!isUserLoggedIn()) {
+        jsonError('لطفاً وارد شوید.', 401);
+    }
+    if (!validateCSRFToken(requestCSRFToken())) {
+        jsonError('توکن امنیتی نامعتبر است.', 403);
+    }
+
+    $userId = (int)$_SESSION['user_id'];
+    $roomId = (int)$_SESSION['room_id'];
+
+    if (!checkRateLimit($rateKey . '_' . $userId, $rateMax, $rateWindow)) {
+        jsonError('تعداد درخواست‌ها بیش از حد مجاز است.', 429);
+    }
+
+    $membership = getCurrentUserMembership();
+    if (!$membership) {
+        clearUserSession();
+        jsonError('دسترسی شما به این روم وجود ندارد.', 401);
+    }
+
+    return ['user_id' => $userId, 'room_id' => $roomId, 'membership' => $membership];
+}
+
+/**
+ * روم‌های فعالی که کاربر عضو آن‌هاست
+ * @param int $userId
+ * @return array
+ */
+function getUserRooms($userId) {
+    $stmt = getDB()->prepare("
+        SELECT r.id, r.name
+        FROM rooms r
+        JOIN users_rooms ur ON ur.room_id = r.id
+        WHERE ur.user_id = :user_id AND r.is_active = 1
+        ORDER BY r.name
+    ");
+    $stmt->execute([':user_id' => $userId]);
+    return $stmt->fetchAll();
+}
+
+/**
+ * کاربران آنلاین روم: خروج نکرده و heartbeat تازه
+ * @param int $roomId
+ * @return array
+ */
+function getOnlineUsers($roomId) {
+    $stmt = getDB()->prepare("
+        SELECT u.id, u.name, u.status
+        FROM users u
+        JOIN users_rooms ur ON u.id = ur.user_id
+        WHERE ur.room_id = :room_id
+        AND u.is_active = 1
+        AND u.status <> 'offline'
+        AND u.last_seen > DATE_SUB(NOW(), INTERVAL :timeout SECOND)
+    ");
+    $stmt->execute([':room_id' => $roomId, ':timeout' => ONLINE_TIMEOUT]);
+    return $stmt->fetchAll();
 }
 
 /**
@@ -396,7 +714,7 @@ function formatMessageTime($timestamp) {
     $msgTime = strtotime($timestamp);
     $now = time();
     $diff = $now - $msgTime;
-    
+
     if ($diff < 60) {
         return 'الان';
     } elseif ($diff < 3600) {
@@ -429,27 +747,27 @@ function jdate($format, $timestamp = null) {
     if ($timestamp === null) {
         $timestamp = time();
     }
-    
+
     $g_d = (int)date('j', $timestamp);
     $g_m = (int)date('n', $timestamp);
     $g_y = (int)date('Y', $timestamp);
-    
+
     $d_4 = $g_y % 4;
     $g_a = [0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
     $doy_g = $g_a[$g_m] + $g_d;
     if ($d_4 == 0 && $g_m > 2) {
         $doy_g++;
     }
-    
+
     $d_33 = (int)(($g_y - 16) % 132 * 0.0305);
     $a = ($d_33 != 3 && $d_4 <= $d_33) ? 286 : 287;
     $b = (($d_33 == 1 || $d_33 == 2) && ($d_33 == $d_4 || $d_4 == 1)) ? 78 : (($d_33 == 3 && $d_4 == 0) ? 80 : 79);
-    
+
     if ((int)(($g_y - 10) / 63) == 30) {
         $a--;
         $b++;
     }
-    
+
     if ($doy_g > $b) {
         $jy = $g_y - 621;
         $doy_j = $doy_g - $b;
@@ -457,7 +775,7 @@ function jdate($format, $timestamp = null) {
         $jy = $g_y - 622;
         $doy_j = $doy_g + $a;
     }
-    
+
     if ($doy_j < 187) {
         $jm = (int)(($doy_j - 1) / 31);
         $jd = $doy_j - (31 * $jm++);
@@ -466,14 +784,14 @@ function jdate($format, $timestamp = null) {
         $jd = $doy_j - 186 - ($jm * 30);
         $jm += 7;
     }
-    
+
     $months = ['', 'فروردین', 'اردیبهشت', 'خرداد', 'تیر', 'مرداد', 'شهریور',
                'مهر', 'آبان', 'آذر', 'دی', 'بهمن', 'اسفند'];
-    
+
     $result = str_replace('j', (string)$jd, $format);
     $result = str_replace('F', $months[$jm], $result);
     $result = str_replace('Y', (string)$jy, $result);
-    
+
     return $result;
 }
 
@@ -492,7 +810,7 @@ function jsonSuccess($data = [], $message = 'موفق') {
         'success' => true,
         'message' => $message,
         'data' => $data
-    ], JSON_UNESCAPED_UNICODE);
+    ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
     exit();
 }
 
@@ -508,7 +826,7 @@ function jsonError($message = 'خطا', $code = 400) {
         'success' => false,
         'message' => $message,
         'data' => null
-    ], JSON_UNESCAPED_UNICODE);
+    ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
     exit();
 }
 
@@ -518,14 +836,19 @@ function jsonError($message = 'خطا', $code = 400) {
 
 /**
  * تنظیم هدرهای امنیتی
+ * CSP تضمین می‌کند مرورگر حتی در صورت خطای برنامه‌نویسی هم به هیچ مقصد خارجی وصل نشود
  */
 function setSecurityHeaders() {
+    if (PHP_SAPI === 'cli') {
+        return;
+    }
+    header("Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; media-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
     header('X-Content-Type-Options: nosniff');
     header('X-Frame-Options: DENY');
-    header('X-XSS-Protection: 1; mode=block');
-    header('Referrer-Policy: strict-origin-when-cross-origin');
-    if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {
-        header('Strict-Transport-Security: max-age=31536000; includeSubDomains');
+    header('Referrer-Policy: same-origin');
+    header('Permissions-Policy: camera=(), geolocation=(), payment=(), usb=()');
+    if (ENABLE_HSTS && isHttps()) {
+        header('Strict-Transport-Security: max-age=31536000');
     }
 }
 
@@ -556,9 +879,13 @@ function verifyPassword($password, $hash) {
  */
 function validatePassword($password) {
     $errors = [];
-    
+
     if (strlen($password) < PASSWORD_MIN_LENGTH) {
         $errors[] = 'رمز عبور باید حداقل ' . PASSWORD_MIN_LENGTH . ' کاراکتر باشد';
+    }
+    // bcrypt فقط 72 بایت اول را در نظر می‌گیرد
+    if (strlen($password) > 72) {
+        $errors[] = 'رمز عبور نباید بیشتر از 72 بایت باشد';
     }
     if (!preg_match('/[A-Z]/', $password)) {
         $errors[] = 'رمز عبور باید شامل حداقل یک حرف بزرگ باشد';
@@ -569,7 +896,7 @@ function validatePassword($password) {
     if (!preg_match('/[0-9]/', $password)) {
         $errors[] = 'رمز عبور باید شامل حداقل یک عدد باشد';
     }
-    
+
     return $errors;
 }
 
@@ -580,7 +907,7 @@ function validatePassword($password) {
  */
 function validateUsername($username) {
     $errors = [];
-    
+
     if (strlen($username) < 3) {
         $errors[] = 'نام کاربری باید حداقل ۳ کاراکتر باشد';
     }
@@ -590,7 +917,7 @@ function validateUsername($username) {
     if (!preg_match('/^[a-zA-Z0-9_]+$/', $username)) {
         $errors[] = 'نام کاربری فقط می‌تواند شامل حروف انگلیسی، اعداد و _ باشد';
     }
-    
+
     return $errors;
 }
 
@@ -608,75 +935,250 @@ function logSecurityEvent($action, $userId = null, $adminId = null, $details = n
             INSERT INTO security_logs (user_id, admin_id, action, ip_address, user_agent, details)
             VALUES (:user_id, :admin_id, :action, :ip, :ua, :details)
         ");
-        
+
         $stmt->execute([
             ':user_id' => $userId,
             ':admin_id' => $adminId,
             ':action' => $action,
             ':ip' => getClientIP(),
-            ':ua' => isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : null,
-            ':details' => $details ? json_encode($details, JSON_UNESCAPED_UNICODE) : null
+            ':ua' => isset($_SERVER['HTTP_USER_AGENT']) ? mb_substr((string)$_SERVER['HTTP_USER_AGENT'], 0, 500, 'UTF-8') : null,
+            ':details' => $details ? json_encode($details, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE) : null
         ]);
     } catch (PDOException $e) {
         error_log("Security log error: " . $e->getMessage());
     }
 }
 
+// ==============================================
+// توابع آپلود
+// ==============================================
+
 /**
- * اعتبارسنجی فایل آپلود شده
- * @param array $file
- * @param string $type
- * @return array
+ * بررسی فایل آپلود شده و تشخیص نوع واقعی آن از روی محتوا
+ * @param mixed $file
+ * @return array ['error' => string, 'mime' => string|null, 'info' => array|null]
  */
-function validateUploadedFile($file, $type = 'image') {
-    $errors = [];
-    
-    if ($file['error'] !== UPLOAD_ERR_OK) {
-        $errors[] = 'خطا در آپلود فایل';
-        return $errors;
+function inspectUploadedFile($file) {
+    $fail = function ($error) {
+        return ['error' => $error, 'mime' => null, 'info' => null];
+    };
+
+    // file[]=... باعث می‌شود مقادیر آرایه باشند
+    if (!is_array($file) || !isset($file['error']) || !is_int($file['error'])) {
+        return $fail('فایل نامعتبر است.');
     }
-    
-    if ($file['size'] > MAX_FILE_SIZE) {
-        $errors[] = 'حجم فایل بیشتر از حد مجاز است';
+    if ($file['error'] === UPLOAD_ERR_INI_SIZE || $file['error'] === UPLOAD_ERR_FORM_SIZE) {
+        return $fail('حجم فایل بیشتر از حد مجاز است.');
     }
-    
+    if ($file['error'] !== UPLOAD_ERR_OK || !is_uploaded_file($file['tmp_name'])) {
+        return $fail('خطا در آپلود فایل.');
+    }
+    if ($file['size'] <= 0 || $file['size'] > MAX_FILE_SIZE) {
+        return $fail('حجم فایل بیشتر از حد مجاز است.');
+    }
+
     $finfo = new finfo(FILEINFO_MIME_TYPE);
-    $mimeType = $finfo->file($file['tmp_name']);
-    
-    // PHP 7.4 compatible - بدون match
-    switch ($type) {
-        case 'image':
-            $allowedTypes = getAllowedImageTypes();
-            break;
-        case 'file':
-            $allowedTypes = getAllowedFileTypes();
-            break;
-        case 'audio':
-            $allowedTypes = getAllowedAudioTypes();
-            break;
-        default:
-            $allowedTypes = [];
+    $mime = $finfo->file($file['tmp_name']);
+    $allowed = getAllowedUploadTypes();
+
+    if (!isset($allowed[$mime])) {
+        return $fail('نوع فایل مجاز نیست.');
     }
-    
-    if (!in_array($mimeType, $allowedTypes)) {
-        $errors[] = 'نوع فایل مجاز نیست';
-    }
-    
-    return $errors;
+
+    return ['error' => '', 'mime' => $mime, 'info' => $allowed[$mime]];
 }
 
 /**
- * تولید نام فایل امن
- * @param string $originalName
+ * تولید نام فایل امن؛ پسوند از فهرست سفید می‌آید نه از ورودی کاربر
+ * @param string $extension
  * @return string
  */
-function generateSecureFileName($originalName) {
-    $extension = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
-    return bin2hex(random_bytes(16)) . '_' . time() . '.' . $extension;
+function generateSecureFileName($extension) {
+    return bin2hex(random_bytes(16)) . '.' . $extension;
+}
+
+/**
+ * نام نمایشی فایل برای ذخیره: بدون مسیر و کاراکتر کنترلی
+ * @param mixed $name
+ * @return string
+ */
+function cleanOriginalFileName($name) {
+    $name = is_string($name) ? $name : '';
+    if (!mb_check_encoding($name, 'UTF-8')) {
+        $name = '';
+    }
+    $name = str_replace('\\', '/', $name);
+    $name = substr((string)strrchr('/' . $name, '/'), 1);
+    $name = trim((string)preg_replace('/[\x00-\x1F\x7F]/u', '', $name));
+    return $name === '' ? 'file' : mb_substr($name, -200, null, 'UTF-8');
 }
 
 // ==============================================
-// شروع Session و تنظیم هدرها
+// اجزای مشترک رابط کاربری
 // ==============================================
-secureSessionStart();
+
+/**
+ * پیام یک‌بارمصرف بعد از ریدایرکت
+ * @param string $type success|error
+ * @param string $message
+ */
+function setFlash($type, $message) {
+    $_SESSION['flash'] = ['type' => $type, 'message' => $message];
+}
+
+/**
+ * HTML پیام یک‌بارمصرف
+ * @return string
+ */
+function renderFlash() {
+    if (empty($_SESSION['flash'])) {
+        return '';
+    }
+    $flash = $_SESSION['flash'];
+    unset($_SESSION['flash']);
+    $class = $flash['type'] === 'success' ? 'alert-success' : 'alert-error';
+    return '<div class="alert ' . $class . '">' . sanitize($flash['message']) . '</div>';
+}
+
+/**
+ * لینک‌های نوار پنل مدیریت
+ * @param string $active
+ * @return string
+ */
+function adminNavLinks($active = '') {
+    $links = [
+        'dashboard' => ['admin.php', 'داشبورد'],
+        'users' => ['admin-users.php', 'کاربران'],
+        'rooms' => ['admin-rooms.php', 'روم‌ها'],
+        'assign' => ['admin-assign-user.php', 'تخصیص کاربر'],
+        'logs' => ['admin-security-logs.php', 'لاگ امنیتی'],
+        'password' => ['admin-change-password.php', 'تغییر رمز'],
+    ];
+    $html = '<div class="navbar-links" style="flex-wrap:wrap">';
+    foreach ($links as $key => $link) {
+        $html .= '<a href="' . $link[0] . '"' . ($key === $active ? ' class="active"' : '') . '>' . $link[1] . '</a>';
+    }
+    return $html . adminLogoutForm() . '</div>';
+}
+
+/**
+ * شروع مشترک صفحات جدید پنل مدیریت
+ * @param string $title
+ * @param string $active
+ * @param bool $narrow
+ */
+function adminPageStart($title, $active, $narrow = false) {
+    echo '<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="UTF-8">'
+        . '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
+        . '<title>' . sanitize($title) . ' | ' . sanitize(SITE_NAME) . '</title>'
+        . '<link rel="stylesheet" href="assets/css/fonts.css"><link rel="stylesheet" href="assets/css/admin.css">'
+        . '</head><body><nav class="navbar"><h1>پنل مدیریت</h1>' . adminNavLinks($active) . '</nav>'
+        . '<div class="container' . ($narrow ? ' narrow' : '') . '">' . renderFlash();
+}
+
+/**
+ * پایان مشترک صفحات جدید پنل مدیریت
+ */
+function adminPageEnd() {
+    echo '</div></body></html>';
+}
+
+/**
+ * لینک‌های صفحه‌بندی با حفظ فیلترهای فعلی
+ * @param int $page
+ * @param int $totalPages
+ * @param array $query
+ * @return string
+ */
+function paginationLinks($page, $totalPages, $query = []) {
+    if ($totalPages <= 1) {
+        return '';
+    }
+    $url = function ($p) use ($query) {
+        return '?' . sanitize(http_build_query(array_merge($query, ['page' => $p])));
+    };
+    $html = '<div class="pagination">';
+    if ($page > 1) {
+        $html .= '<a class="btn btn-secondary btn-small" href="' . $url($page - 1) . '">قبلی</a>';
+    }
+    $html .= '<span class="muted-text">صفحه ' . (int)$page . ' از ' . (int)$totalPages . '</span>';
+    if ($page < $totalPages) {
+        $html .= '<a class="btn btn-secondary btn-small" href="' . $url($page + 1) . '">بعدی</a>';
+    }
+    return $html . '</div>';
+}
+
+/**
+ * ذخیره رمز جدید؛ با افزایش session_version همه نشست‌های قبلی آن حساب باطل می‌شوند
+ * @param string $type user|admin
+ * @param int $accountId
+ * @param string $password
+ */
+function setAccountPassword($type, $accountId, $password) {
+    $table = $type === 'admin' ? 'admins' : 'users';
+    $stmt = getDB()->prepare("UPDATE {$table} SET password = :password, session_version = session_version + 1 WHERE id = :id");
+    $stmt->execute([':password' => hashPassword($password), ':id' => $accountId]);
+}
+
+/**
+ * تغییر رمز توسط خود کاربر یا ادمین؛ نشست فعلی معتبر می‌ماند و بقیه باطل می‌شوند
+ * @param string $type user|admin
+ * @param int $accountId
+ * @param string $current
+ * @param string $new
+ * @param string $confirm
+ * @return string خطا یا رشته خالی
+ */
+function changeOwnPassword($type, $accountId, $current, $new, $confirm) {
+    if (!checkRateLimit('change_password_' . $type . '_' . $accountId, 5, 900)) {
+        return 'تعداد تلاش‌ها بیش از حد مجاز است. لطفاً بعداً تلاش کنید.';
+    }
+
+    $table = $type === 'admin' ? 'admins' : 'users';
+    $stmt = getDB()->prepare("SELECT password, session_version FROM {$table} WHERE id = :id AND is_active = 1");
+    $stmt->execute([':id' => $accountId]);
+    $account = $stmt->fetch();
+
+    if (!$account || !verifyPassword($current, $account['password'])) {
+        logSecurityEvent($type . '_password_change_failed', $type === 'user' ? $accountId : null, $type === 'admin' ? $accountId : null);
+        return 'رمز عبور فعلی اشتباه است.';
+    }
+    if ($new !== $confirm) {
+        return 'رمز جدید و تکرار آن یکسان نیستند.';
+    }
+    if ($new === $current) {
+        return 'رمز جدید باید با رمز فعلی متفاوت باشد.';
+    }
+    $errors = validatePassword($new);
+    if ($errors) {
+        return implode('، ', $errors);
+    }
+
+    setAccountPassword($type, $accountId, $new);
+
+    session_regenerate_id(true);
+    $versionKey = $type === 'admin' ? 'admin_session_version' : 'session_version';
+    $_SESSION[$versionKey] = (int)$account['session_version'] + 1;
+
+    logSecurityEvent($type . '_password_changed', $type === 'user' ? $accountId : null, $type === 'admin' ? $accountId : null);
+    return '';
+}
+
+/**
+ * دکمه خروج ادمین به صورت فرم POST
+ * @return string
+ */
+function adminLogoutForm() {
+    return '<form method="POST" action="admin-logout.php" style="display:inline;margin:0">'
+        . csrfField()
+        . '<button type="submit" style="background:none;border:none;color:rgba(255,255,255,0.8);font:inherit;font-size:0.9rem;padding:8px 16px;cursor:pointer">خروج</button>'
+        . '</form>';
+}
+
+// ==============================================
+// تنظیم هدرها و شروع Session
+// ==============================================
 setSecurityHeaders();
+if (!defined('NO_SESSION')) {
+    secureSessionStart();
+}

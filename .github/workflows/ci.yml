@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: PHP ${{ matrix.php }} / ${{ matrix.db }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - php: '7.4'
+            db: mysql:5.7
+          - php: '8.1'
+            db: mysql:8.0
+          - php: '8.3'
+            db: mariadb:10.11
+    services:
+      database:
+        image: ${{ matrix.db }}
+        env:
+          MYSQL_ROOT_PASSWORD: ci-root-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -pci-root-password"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PASSWORD: ci-root-password
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: pdo_mysql, mbstring, fileinfo, curl
+          coverage: none
+
+      - name: Install MySQL client
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq mysql-client
+
+      - name: Lint PHP
+        run: find . -name '*.php' -not -path './.git/*' -print0 | xargs -0 -n1 php -l > /dev/null
+
+      - name: Upgrade from the first released schema
+        env:
+          CHATROOM_DB_HOST: 127.0.0.1
+          CHATROOM_DB_USER: root
+          CHATROOM_DB_PASS: ci-root-password
+          CHATROOM_ERROR_LOG_FILE: /tmp/migrate-error.log
+        run: |
+          git show 5060d1d:database.sql | tr -d '\r' | mysql -h "$DB_HOST" -uroot -p"$DB_PASSWORD"
+          php scripts/migrate.php
+          php scripts/migrate.php | grep -q 'Nothing to migrate'
+          test "$(mysql -h "$DB_HOST" -uroot -p"$DB_PASSWORD" -N chatroom_secure -e 'SELECT COUNT(*) FROM admins')" = "0"
+          mysql -h "$DB_HOST" -uroot -p"$DB_PASSWORD" chatroom_secure -e 'SELECT session_version FROM users LIMIT 1'
+          mysql -h "$DB_HOST" -uroot -p"$DB_PASSWORD" -e 'DROP DATABASE chatroom_secure'
+
+      - name: End-to-end tests on the real database
+        env:
+          CHATROOM_TEST_DB_HOST: 127.0.0.1
+          CHATROOM_TEST_DB_USER: root
+          CHATROOM_TEST_DB_PASS: ci-root-password
+        run: php tests/run.php
+
+  package:
+    name: Build release package
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        id: build
+        run: |
+          version="${GITHUB_REF_NAME//\//-}-${GITHUB_SHA::7}"
+          mkdir dist
+          git archive --format=tar.gz --prefix="chatroom-$version/" -o "dist/chatroom-$version.tar.gz" HEAD
+          (cd dist && sha256sum "chatroom-$version.tar.gz" > "chatroom-$version.tar.gz.sha256")
+          tar -tzf "dist/chatroom-$version.tar.gz" | grep -q 'assets/fonts/Vazirmatn-Regular.woff2'
+          if tar -tzf "dist/chatroom-$version.tar.gz" | grep -qE '/tests/|/\.github/'; then
+            echo 'Package contains files that must not ship' >&2
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chatroom-release
+          path: dist/*
+
+      - name: Publish GitHub release for version tags
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes

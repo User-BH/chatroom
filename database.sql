@@ -18,6 +18,7 @@ CREATE TABLE `admins` (
     `username` VARCHAR(50) NOT NULL UNIQUE,
     `password` VARCHAR(255) NOT NULL,
     `email` VARCHAR(100) DEFAULT NULL,
+    `session_version` INT UNSIGNED NOT NULL DEFAULT 0,
     `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     `last_login` TIMESTAMP NULL,
     `is_active` TINYINT(1) DEFAULT 1,
@@ -36,6 +37,7 @@ CREATE TABLE `users` (
     `password` VARCHAR(255) NOT NULL,
     `name` VARCHAR(100) NOT NULL,
     `avatar` VARCHAR(255) DEFAULT NULL,
+    `session_version` INT UNSIGNED NOT NULL DEFAULT 0,
     `status` ENUM('online', 'offline', 'away') DEFAULT 'offline',
     `last_seen` TIMESTAMP NULL,
     `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -103,6 +105,7 @@ CREATE TABLE `messages` (
     `deleted_at` TIMESTAMP NULL,
     `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX `idx_room_id` (`room_id`),
+    INDEX `idx_room_message` (`room_id`, `id`),
     INDEX `idx_user_id` (`user_id`),
     INDEX `idx_reply_to` (`reply_to`),
     INDEX `idx_created_at` (`created_at`),
@@ -123,20 +126,6 @@ CREATE TABLE `message_reads` (
     UNIQUE KEY `unique_message_user` (`message_id`, `user_id`),
     FOREIGN KEY (`message_id`) REFERENCES `messages`(`id`) ON DELETE CASCADE,
     FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- ===================================================
--- جدول توکن‌های CSRF
--- ===================================================
-CREATE TABLE `csrf_tokens` (
-    `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    `token` VARCHAR(64) NOT NULL UNIQUE,
-    `session_id` VARCHAR(128) NOT NULL,
-    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    `expires_at` TIMESTAMP NOT NULL,
-    INDEX `idx_token` (`token`),
-    INDEX `idx_session_id` (`session_id`),
-    INDEX `idx_expires_at` (`expires_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ===================================================
@@ -170,7 +159,8 @@ CREATE TABLE `login_attempts` (
     `attempted_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX `idx_ip_address` (`ip_address`),
     INDEX `idx_attempt_type` (`attempt_type`),
-    INDEX `idx_attempted_at` (`attempted_at`)
+    INDEX `idx_attempted_at` (`attempted_at`),
+    INDEX `idx_username_attempt` (`username`, `attempted_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ===================================================
@@ -187,9 +177,20 @@ CREATE TABLE `settings` (
 -- درج داده‌های اولیه
 -- ===================================================
 
--- ادمین پیش‌فرض (password: Admin@123)
-INSERT INTO `admins` (`username`, `password`, `email`) VALUES
-('admin', '$2y$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4rLTDBgbLHPcYjGi', 'admin@example.com');
+-- ===================================================
+-- مایگریشن‌هایی که این schema از قبل شامل آن‌هاست
+-- ===================================================
+CREATE TABLE `schema_migrations` (
+    `name` VARCHAR(190) NOT NULL PRIMARY KEY,
+    `applied_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO `schema_migrations` (`name`) VALUES
+('001_security_hardening.sql'),
+('002_session_version.sql');
+
+-- ادمین پیش‌فرض عمداً وجود ندارد. پس از نصب اجرا کنید:
+--   php scripts/admin-password.php YOUR_ADMIN_USERNAME
 
 -- تنظیمات پیش‌فرض
 INSERT INTO `settings` (`key_name`, `value`) VALUES
@@ -199,27 +200,3 @@ INSERT INTO `settings` (`key_name`, `value`) VALUES
 ('max_message_length', '5000'),
 ('max_file_size', '10485760'),
 ('allowed_file_types', 'jpg,jpeg,png,gif,webp,pdf,doc,docx,mp3,wav,ogg');
-
--- ===================================================
--- ایجاد Event برای پاکسازی خودکار
--- ===================================================
-DELIMITER //
-
-CREATE EVENT IF NOT EXISTS `cleanup_expired_tokens`
-ON SCHEDULE EVERY 1 HOUR
-DO
-BEGIN
-    DELETE FROM `csrf_tokens` WHERE `expires_at` < NOW();
-END //
-
-CREATE EVENT IF NOT EXISTS `cleanup_old_logs`
-ON SCHEDULE EVERY 1 DAY
-DO
-BEGIN
-    DELETE FROM `security_logs` WHERE `created_at` < DATE_SUB(NOW(), INTERVAL 90 DAY);
-END //
-
-DELIMITER ;
-
--- فعال‌سازی Event Scheduler
-SET GLOBAL event_scheduler = ON;

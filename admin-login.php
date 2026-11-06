@@ -21,48 +21,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!validateCSRFToken($_POST[CSRF_TOKEN_NAME] ?? '')) {
         $error = 'درخواست نامعتبر است. لطفاً دوباره تلاش کنید.';
     } else {
-        $ip = getClientIP();
-        
-        // بررسی محدودیت تلاش ورود
-        if (!checkLoginAttempts($ip, 'admin')) {
-            $error = 'تعداد تلاش‌های ورود بیش از حد مجاز است. لطفاً ' . ceil(LOGIN_LOCKOUT_TIME / 60) . ' دقیقه صبر کنید.';
+        $username = cleanInput($_POST['username'] ?? '');
+        $password = postString('password');
+
+        $result = attemptLogin('admin', $username, $password);
+
+        if (!$result['account']) {
+            $error = $result['error'];
         } else {
-            $username = cleanInput($_POST['username'] ?? '');
-            $password = $_POST['password'] ?? '';
-            
-            if (empty($username) || empty($password)) {
-                $error = 'لطفاً نام کاربری و رمز عبور را وارد کنید.';
-            } else {
-                // جستجوی ادمین
-                $stmt = $db->prepare("SELECT id, username, password, is_active FROM admins WHERE username = :username");
-                $stmt->execute([':username' => $username]);
-                $admin = $stmt->fetch();
-                
-                if (!$admin) {
-                    logLoginAttempt($ip, $username, 'admin', false);
-                    $error = 'نام کاربری یا رمز عبور اشتباه است.';
-                } elseif (!$admin['is_active']) {
-                    $error = 'حساب کاربری شما غیرفعال شده است.';
-                } elseif (!verifyPassword($password, $admin['password'])) {
-                    logLoginAttempt($ip, $username, 'admin', false);
-                    $error = 'نام کاربری یا رمز عبور اشتباه است.';
-                } else {
-                    // ورود موفق
-                    logLoginAttempt($ip, $username, 'admin', true);
-                    session_regenerate_id(true);
-                    
-                    $_SESSION['admin_id'] = $admin['id'];
-                    $_SESSION['admin_username'] = $admin['username'];
-                    
-                    // بروزرسانی last_login
-                    $stmt = $db->prepare("UPDATE admins SET last_login = NOW() WHERE id = :id");
-                    $stmt->execute([':id' => $admin['id']]);
-                    
-                    logSecurityEvent('admin_login', null, $admin['id'], ['username' => $username]);
-                    
-                    redirect('admin.php');
-                }
-            }
+            $admin = $result['account'];
+            rotateSessionAfterLogin();
+
+            $_SESSION['admin_id'] = (int)$admin['id'];
+            $_SESSION['admin_username'] = $admin['username'];
+            $_SESSION['admin_session_version'] = (int)$admin['session_version'];
+
+            // بروزرسانی last_login
+            $stmt = $db->prepare("UPDATE admins SET last_login = NOW() WHERE id = :id");
+            $stmt->execute([':id' => $admin['id']]);
+
+            logSecurityEvent('admin_login', null, $admin['id'], ['username' => $username]);
+
+            redirect('admin.php');
         }
     }
 }
@@ -80,7 +60,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             padding: 0;
             box-sizing: border-box;
         }
-        
+
         body {
             font-family: 'Vazirmatn', Tahoma, sans-serif;
             background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
@@ -90,7 +70,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             justify-content: center;
             padding: 20px;
         }
-        
+
         .login-container {
             background: rgba(255, 255, 255, 0.05);
             border: 1px solid rgba(255, 255, 255, 0.1);
@@ -100,7 +80,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             width: 100%;
             backdrop-filter: blur(20px);
         }
-        
+
         .back-link {
             display: inline-flex;
             align-items: center;
@@ -111,16 +91,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             margin-bottom: 25px;
             transition: color 0.3s;
         }
-        
+
         .back-link:hover {
             color: #fff;
         }
-        
+
         .back-link svg {
             width: 18px;
             height: 18px;
         }
-        
+
         .logo {
             width: 70px;
             height: 70px;
@@ -131,13 +111,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             align-items: center;
             justify-content: center;
         }
-        
+
         .logo svg {
             width: 36px;
             height: 36px;
             fill: white;
         }
-        
+
         h2 {
             color: #fff;
             font-size: 1.6rem;
@@ -145,14 +125,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             margin-bottom: 8px;
             text-align: center;
         }
-        
+
         .subtitle {
             color: rgba(255,255,255,0.5);
             text-align: center;
             margin-bottom: 35px;
             font-size: 0.9rem;
         }
-        
+
         .error-message {
             background: rgba(233, 69, 96, 0.2);
             border: 1px solid rgba(233, 69, 96, 0.3);
@@ -165,18 +145,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             align-items: center;
             gap: 10px;
         }
-        
+
         .error-message svg {
             width: 20px;
             height: 20px;
             flex-shrink: 0;
             fill: currentColor;
         }
-        
+
         .form-group {
             margin-bottom: 20px;
         }
-        
+
         .form-group label {
             display: block;
             color: rgba(255,255,255,0.7);
@@ -184,11 +164,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             font-weight: 500;
             margin-bottom: 8px;
         }
-        
+
         .input-wrapper {
             position: relative;
         }
-        
+
         .input-wrapper svg {
             position: absolute;
             right: 15px;
@@ -198,7 +178,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             height: 20px;
             fill: rgba(255,255,255,0.4);
         }
-        
+
         input {
             width: 100%;
             padding: 15px 15px 15px 15px;
@@ -211,17 +191,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             background: rgba(255,255,255,0.05);
             color: #fff;
         }
-        
+
         input::placeholder {
             color: rgba(255,255,255,0.3);
         }
-        
+
         input:focus {
             outline: none;
             border-color: #e94560;
             background: rgba(255,255,255,0.08);
         }
-        
+
         .btn-submit {
             width: 100%;
             padding: 16px;
@@ -236,17 +216,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             transition: all 0.3s;
             margin-top: 10px;
         }
-        
+
         .btn-submit:hover {
             transform: translateY(-2px);
             box-shadow: 0 6px 25px rgba(233, 69, 96, 0.4);
         }
-        
+
         @media (max-width: 480px) {
             .login-container {
                 padding: 35px 25px;
             }
-            
+
             h2 {
                 font-size: 1.4rem;
             }
@@ -261,16 +241,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             </svg>
             بازگشت
         </a>
-        
+
         <div class="logo">
             <svg viewBox="0 0 24 24">
                 <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/>
             </svg>
         </div>
-        
+
         <h2>پنل مدیریت</h2>
         <p class="subtitle">برای ورود اطلاعات خود را وارد کنید</p>
-        
+
         <?php if ($error): ?>
             <div class="error-message">
                 <svg viewBox="0 0 24 24">
@@ -279,10 +259,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <?php echo sanitize($error); ?>
             </div>
         <?php endif; ?>
-        
+
         <form method="POST" autocomplete="off">
             <?php echo csrfField(); ?>
-            
+
             <div class="form-group">
                 <label>نام کاربری</label>
                 <div class="input-wrapper">
@@ -292,7 +272,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <input type="text" name="username" placeholder="نام کاربری مدیر" required autofocus>
                 </div>
             </div>
-            
+
             <div class="form-group">
                 <label>رمز عبور</label>
                 <div class="input-wrapper">
@@ -302,7 +282,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <input type="password" name="password" placeholder="رمز عبور" required>
                 </div>
             </div>
-            
+
             <button type="submit" class="btn-submit">ورود به پنل</button>
         </form>
     </div>

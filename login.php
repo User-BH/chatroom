@@ -1,7 +1,9 @@
 <?php
 /**
  * صفحه ورود کاربر
- * چت روم پیشرفته - نسخه 2.0
+ * ورود دو مرحله‌ای است: اول رمز عبور، بعد انتخاب روم. نام روم‌ها فقط بعد از
+ * تایید هویت و فقط برای روم‌های خود کاربر نمایش داده می‌شود.
+ * چت روم پیشرفته - نسخه 2.1
  * سازگار با PHP 7.4+
  */
 
@@ -16,104 +18,100 @@ $error = '';
 $success = '';
 
 // پیام خروج موفق
-if (isset($_GET['logout']) && $_GET['logout'] == '1') {
+if (isset($_GET['logout']) && $_GET['logout'] === '1') {
     $success = 'با موفقیت از سیستم خارج شدید.';
+}
+if (isset($_GET['error']) && $_GET['error'] === 'session') {
+    $error = 'نشست شما منقضی شده است. لطفاً دوباره وارد شوید.';
 }
 
 $db = getDB();
 
-// دریافت لیست روم‌ها
-$stmt = $db->prepare("SELECT id, name FROM rooms WHERE is_active = 1 ORDER BY name");
-$stmt->execute();
-$rooms = $stmt->fetchAll();
+/**
+ * ورود نهایی کاربر به یک روم
+ * @param array $pending
+ * @param int $roomId
+ */
+function completeLogin($pending, $roomId) {
+    $userId = (int)$pending['user_id'];
+
+    unset($_SESSION['pending_login']);
+    $_SESSION['user_id'] = $userId;
+    $_SESSION['username'] = $pending['username'];
+    $_SESSION['name'] = $pending['name'];
+    $_SESSION['room_id'] = $roomId;
+    $_SESSION['session_version'] = (int)$pending['session_version'];
+    $_SESSION['login_time'] = time();
+
+    updateUserOnlineStatus($userId);
+    logSecurityEvent('login_success', $userId, null, ['room_id' => $roomId]);
+
+    redirect('chat.php');
+}
+
+// مرحله انتخاب روم فقط پس از تایید رمز و برای مدت کوتاه معتبر است
+$pending = $_SESSION['pending_login'] ?? null;
+if ($pending && $pending['expires'] < time()) {
+    unset($_SESSION['pending_login']);
+    $pending = null;
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $step = postString('step');
+
     // بررسی CSRF
     if (!validateCSRFToken($_POST[CSRF_TOKEN_NAME] ?? '')) {
         $error = 'توکن امنیتی نامعتبر است. لطفاً صفحه را رفرش کنید.';
+    } elseif ($step === 'cancel') {
+        unset($_SESSION['pending_login']);
+        $pending = null;
+    } elseif ($step === 'room') {
+        if (!$pending) {
+            $error = 'مهلت انتخاب روم تمام شده است. لطفاً دوباره وارد شوید.';
+        } else {
+            $selectedRoom = validatePositiveInt($_POST['room_id'] ?? 0);
+            if (!$selectedRoom || !getActiveMembership((int)$pending['user_id'], $selectedRoom)) {
+                $error = 'لطفاً یکی از روم‌های خود را انتخاب کنید.';
+            } else {
+                completeLogin($pending, $selectedRoom);
+            }
+        }
     } else {
         $username = cleanInput($_POST['username'] ?? '');
-        $password = $_POST['password'] ?? '';
-        $selectedRoom = (int)($_POST['room_id'] ?? 0);
-        $ip = getClientIP();
-        
-        // Rate Limiting
-        if (!checkRateLimit('login_' . $ip, MAX_LOGIN_ATTEMPTS, LOGIN_LOCKOUT_TIME)) {
-            $error = 'تعداد تلاش‌های ورود بیش از حد مجاز است. لطفاً ' . ceil(LOGIN_LOCKOUT_TIME / 60) . ' دقیقه صبر کنید.';
-        } elseif (empty($username) || empty($password)) {
-            $error = 'لطفاً نام کاربری و رمز عبور را وارد کنید.';
-        } elseif ($selectedRoom <= 0) {
-            $error = 'لطفاً یک روم انتخاب کنید.';
+        $password = postString('password');
+
+        $result = attemptLogin('user', $username, $password);
+
+        if (!$result['account']) {
+            $error = $result['error'];
         } else {
-            // جستجوی کاربر
-            $stmt = $db->prepare("
-                SELECT id, username, password, name, is_active, login_attempts, locked_until 
-                FROM users 
-                WHERE username = :username
-            ");
-            $stmt->execute([':username' => $username]);
-            $user = $stmt->fetch();
-            
-            if (!$user) {
-                $error = 'نام کاربری یا رمز عبور اشتباه است.';
-                logSecurityEvent('login_failed_username', null, null, ['username' => $username]);
-            } elseif (!$user['is_active']) {
-                $error = 'حساب کاربری شما غیرفعال شده است.';
-            } elseif ($user['locked_until'] && strtotime($user['locked_until']) > time()) {
-                $error = 'حساب شما موقتاً قفل شده است. لطفاً بعداً تلاش کنید.';
-            } elseif (!verifyPassword($password, $user['password'])) {
-                // افزایش تعداد تلاش‌های ناموفق
-                $attempts = $user['login_attempts'] + 1;
-                $lockedUntil = null;
-                
-                if ($attempts >= MAX_LOGIN_ATTEMPTS) {
-                    $lockedUntil = date('Y-m-d H:i:s', time() + LOGIN_LOCKOUT_TIME);
-                    $error = 'حساب شما به دلیل تلاش‌های مکرر ناموفق قفل شد.';
-                } else {
-                    $error = 'نام کاربری یا رمز عبور اشتباه است.';
-                }
-                
-                $stmt = $db->prepare("UPDATE users SET login_attempts = :attempts, locked_until = :locked WHERE id = :id");
-                $stmt->execute([
-                    ':attempts' => $attempts,
-                    ':locked' => $lockedUntil,
-                    ':id' => $user['id']
-                ]);
-                
-                logSecurityEvent('login_failed_password', $user['id'], null, ['attempts' => $attempts]);
+            $account = $result['account'];
+            rotateSessionAfterLogin();
+
+            $pending = [
+                'user_id' => (int)$account['id'],
+                'username' => $account['username'],
+                'name' => $account['name'],
+                'session_version' => (int)$account['session_version'],
+                'expires' => time() + PENDING_LOGIN_TTL
+            ];
+
+            $userRooms = getUserRooms((int)$account['id']);
+
+            if (count($userRooms) === 0) {
+                $pending = null;
+                $error = 'شما هنوز عضو هیچ روم فعالی نیستید. با مدیر تماس بگیرید.';
+            } elseif (count($userRooms) === 1) {
+                completeLogin($pending, (int)$userRooms[0]['id']);
             } else {
-                // بررسی عضویت در روم
-                $stmt = $db->prepare("SELECT 1 FROM users_rooms WHERE user_id = :user_id AND room_id = :room_id");
-                $stmt->execute([':user_id' => $user['id'], ':room_id' => $selectedRoom]);
-                
-                if (!$stmt->fetch()) {
-                    $error = 'شما عضو این روم نیستید.';
-                } else {
-                    // ورود موفق
-                    session_regenerate_id(true);
-                    
-                    $_SESSION['user_id'] = $user['id'];
-                    $_SESSION['username'] = $user['username'];
-                    $_SESSION['name'] = $user['name'];
-                    $_SESSION['room_id'] = $selectedRoom;
-                    $_SESSION['login_time'] = time();
-                    
-                    // ریست تلاش‌های ناموفق و به‌روزرسانی آخرین ورود
-                    $stmt = $db->prepare("
-                        UPDATE users 
-                        SET login_attempts = 0, locked_until = NULL, status = 'online', last_seen = NOW() 
-                        WHERE id = :id
-                    ");
-                    $stmt->execute([':id' => $user['id']]);
-                    
-                    logSecurityEvent('login_success', $user['id'], null, ['room_id' => $selectedRoom]);
-                    
-                    redirect('chat.php');
-                }
+                $_SESSION['pending_login'] = $pending;
             }
         }
     }
 }
+
+// فقط روم‌های خود کاربر و فقط در مرحله دوم
+$rooms = $pending ? getUserRooms((int)$pending['user_id']) : [];
 ?>
 <!DOCTYPE html>
 <html lang="fa" dir="rtl">
@@ -128,7 +126,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             padding: 0;
             box-sizing: border-box;
         }
-        
+
         body {
             font-family: 'Vazirmatn', Tahoma, sans-serif;
             background: linear-gradient(135deg, #075e54 0%, #128c7e 100%);
@@ -138,7 +136,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             justify-content: center;
             padding: 20px;
         }
-        
+
         .login-container {
             background: white;
             border-radius: 20px;
@@ -147,14 +145,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             width: 100%;
             overflow: hidden;
         }
-        
+
         .login-header {
             background: linear-gradient(135deg, #075e54 0%, #128c7e 100%);
             padding: 40px 30px;
             text-align: center;
             color: white;
         }
-        
+
         .login-logo {
             width: 80px;
             height: 80px;
@@ -165,32 +163,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             justify-content: center;
             margin: 0 auto 20px;
         }
-        
+
         .login-logo svg {
             width: 45px;
             height: 45px;
             fill: white;
         }
-        
+
         .login-header h1 {
             font-size: 1.5rem;
             font-weight: 600;
             margin-bottom: 8px;
         }
-        
+
         .login-header p {
             opacity: 0.9;
             font-size: 0.9rem;
         }
-        
+
         .login-form {
             padding: 30px;
         }
-        
+
         .form-group {
             margin-bottom: 20px;
         }
-        
+
         .form-group label {
             display: block;
             margin-bottom: 8px;
@@ -198,7 +196,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             color: #333;
             font-size: 0.9rem;
         }
-        
+
         .form-group input,
         .form-group select {
             width: 100%;
@@ -210,14 +208,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             transition: all 0.3s;
             background: #fafafa;
         }
-        
+
         .form-group input:focus,
         .form-group select:focus {
             outline: none;
             border-color: #075e54;
             background: white;
         }
-        
+
         .btn-submit {
             width: 100%;
             padding: 16px;
@@ -231,12 +229,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             cursor: pointer;
             transition: all 0.3s;
         }
-        
+
         .btn-submit:hover {
             transform: translateY(-2px);
             box-shadow: 0 8px 25px rgba(7, 94, 84, 0.4);
         }
-        
+
         .error-message {
             background: #ffebee;
             color: #c62828;
@@ -248,14 +246,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             align-items: center;
             gap: 10px;
         }
-        
+
         .error-message svg {
             width: 20px;
             height: 20px;
             flex-shrink: 0;
             fill: currentColor;
         }
-        
+
         .success-message {
             background: #e8f5e9;
             color: #2e7d32;
@@ -267,21 +265,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             align-items: center;
             gap: 10px;
         }
-        
+
         .success-message svg {
             width: 20px;
             height: 20px;
             flex-shrink: 0;
             fill: currentColor;
         }
-        
+
         .admin-link {
             text-align: center;
             margin-top: 20px;
             padding-top: 20px;
             border-top: 1px solid #eee;
         }
-        
+
         .admin-link a {
             color: #075e54;
             text-decoration: none;
@@ -289,16 +287,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             font-weight: 500;
             transition: color 0.3s;
         }
-        
+
         .admin-link a:hover {
             color: #128c7e;
         }
-        
+
+        .link-button {
+            background: none;
+            border: none;
+            color: #075e54;
+            font: inherit;
+            font-size: 0.9rem;
+            cursor: pointer;
+        }
+
         @media (max-width: 480px) {
             .login-header {
                 padding: 30px 20px;
             }
-            
+
             .login-form {
                 padding: 20px;
             }
@@ -316,10 +323,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <h1><?php echo SITE_NAME; ?></h1>
             <p>برای ورود اطلاعات خود را وارد کنید</p>
         </div>
-        
+
         <form class="login-form" method="POST" autocomplete="off">
             <?php echo csrfField(); ?>
-            
+
             <?php if ($success): ?>
                 <div class="success-message">
                     <svg viewBox="0 0 24 24">
@@ -328,7 +335,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <?php echo sanitize($success); ?>
                 </div>
             <?php endif; ?>
-            
+
             <?php if ($error): ?>
                 <div class="error-message">
                     <svg viewBox="0 0 24 24">
@@ -337,33 +344,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <?php echo sanitize($error); ?>
                 </div>
             <?php endif; ?>
-            
-            <div class="form-group">
-                <label for="username">نام کاربری</label>
-                <input type="text" id="username" name="username" placeholder="نام کاربری خود را وارد کنید" required autofocus>
-            </div>
-            
-            <div class="form-group">
-                <label for="password">رمز عبور</label>
-                <input type="password" id="password" name="password" placeholder="رمز عبور خود را وارد کنید" required>
-            </div>
-            
-            <div class="form-group">
-                <label for="room_id">انتخاب روم</label>
-                <select id="room_id" name="room_id" required>
-                    <option value="">-- یک روم انتخاب کنید --</option>
-                    <?php foreach ($rooms as $room): ?>
-                        <option value="<?php echo $room['id']; ?>"><?php echo sanitize($room['name']); ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            
-            <button type="submit" class="btn-submit">ورود به چت روم</button>
-            
-            <div class="admin-link">
-                <a href="admin-login.php">ورود به پنل مدیریت</a>
-            </div>
+
+            <?php if ($pending): ?>
+                <input type="hidden" name="step" value="room">
+
+                <div class="form-group">
+                    <label for="room_id">انتخاب روم</label>
+                    <select id="room_id" name="room_id" required autofocus>
+                        <option value="">-- یک روم انتخاب کنید --</option>
+                        <?php foreach ($rooms as $room): ?>
+                            <option value="<?php echo (int)$room['id']; ?>"><?php echo sanitize($room['name']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+
+                <button type="submit" class="btn-submit">ورود به چت روم</button>
+            <?php else: ?>
+                <input type="hidden" name="step" value="password">
+
+                <div class="form-group">
+                    <label for="username">نام کاربری</label>
+                    <input type="text" id="username" name="username" placeholder="نام کاربری خود را وارد کنید" required autofocus>
+                </div>
+
+                <div class="form-group">
+                    <label for="password">رمز عبور</label>
+                    <input type="password" id="password" name="password" placeholder="رمز عبور خود را وارد کنید" required>
+                </div>
+
+                <button type="submit" class="btn-submit">ورود</button>
+
+                <div class="admin-link">
+                    <a href="admin-login.php">ورود به پنل مدیریت</a>
+                </div>
+            <?php endif; ?>
         </form>
+
+        <?php if ($pending): ?>
+            <form method="POST" class="login-form admin-link">
+                <?php echo csrfField(); ?>
+                <input type="hidden" name="step" value="cancel">
+                <button type="submit" class="link-button">انصراف و ورود با حساب دیگر</button>
+            </form>
+        <?php endif; ?>
     </div>
 </body>
 </html>
