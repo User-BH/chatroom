@@ -505,7 +505,9 @@ $frankOther = $newClient();
 $frankOther->login('frank');
 $changePw = function ($client, $current, $new, $confirm, $page = 'change-password.php') {
     $t = $client->token($page);
-    return $client->req('POST', $page, ['csrf_token' => $t, 'current_password' => $current, 'new_password' => $new, 'confirm_password' => $confirm], [], true);
+    $r = $client->req('POST', $page, ['csrf_token' => $t, 'current_password' => $current, 'new_password' => $new, 'confirm_password' => $confirm]);
+    // مثل مرورگر، ریدایرکت با GET دنبال می‌شود تا پیام یک‌بارمصرف نمایش داده شود
+    return $r['status'] === 302 ? $client->req('GET', $page) : $r;
 };
 check('بدون ورود به تغییر رمز دسترسی نیست', $newClient()->req('GET', 'change-password.php')['status'] === 302);
 check('چت لینک تغییر رمز دارد', strpos($frank->req('GET', 'chat.php')['body'], 'href="change-password.php"') !== false);
