@@ -1,6 +1,5 @@
-# نمونه پیکربندی Nginx
-# قوانین .htaccess روی Nginx اثر ندارند؛ بدون این deny ها پوشه uploads و logs از وب باز است.
-# مسیرها، server_name، گواهی و نسخه PHP-FPM را با سرور خود تطبیق دهید.
+# پیکربندی Nginx
+# مسیرها، server_name و گواهی را با سرور خود تطبیق دهید.
 
 server {
     listen 80;
@@ -20,6 +19,7 @@ server {
     root /var/www/chatroom;
     index index.php;
     charset utf-8;
+    server_tokens off;
 
     # کمی بیشتر از MAX_FILE_SIZE برنامه؛ upload_max_filesize و post_max_size در PHP هم همین باشد
     client_max_body_size 12m;
@@ -27,7 +27,7 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
 
     # پوشه‌هایی که هرگز نباید از وب سرو شوند
-    location ~ ^/(uploads|logs|includes|scripts|migrations|tests|deploy)(/|$) {
+    location ~ ^/(uploads|logs|includes|scripts|migrations|tests|deploy|docker)(/|$) {
         deny all;
     }
 
@@ -35,12 +35,12 @@ server {
     location ~ (^|/)\. {
         deny all;
     }
-    location ~ \.(sql|log|md|txt|example|conf|bak|tgz|zip)$ {
+    location ~ \.(sql|log|md|txt|ini|yml|example|conf|bak|tgz|zip)$ {
         deny all;
     }
 
     # فایل‌هایی که فقط include می‌شوند
-    location ~ ^/(config|config\.local|config\.local\.example|db|functions)\.php$ {
+    location ~ ^/(config|config\.local|config\.local\.example|db|functions)\.php(/|$) {
         deny all;
     }
 
@@ -49,7 +49,7 @@ server {
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         fastcgi_param HTTPS $https if_not_empty;
-        fastcgi_pass unix:/run/php/php8.1-fpm.sock;
+        fastcgi_pass unix:/run/php/php8.5-fpm.sock;
     }
 
     location / {

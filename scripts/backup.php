@@ -33,12 +33,8 @@ if (!is_dir($destination) && !mkdir($destination, 0700, true)) {
 $tempDir = makePrivateTempDir();
 $defaultsFile = writeMysqlDefaultsFile($tempDir);
 
-$dump = ['mysqldump', '--defaults-extra-file=' . $defaultsFile, '--single-transaction', '--no-tablespaces', '--default-character-set=utf8mb4'];
-// mysqldump نسخه 8 روی سرورهای قدیمی‌تر و MariaDB بدون این گزینه خطا می‌دهد
-if (strpos(runCommand(['mysqldump', '--help']), 'column-statistics') !== false) {
-    $dump[] = '--column-statistics=0';
-}
-$dump[] = DB_NAME;
+// GTID خاموش است چون به دسترسی FLUSH نیاز دارد و کاربر برنامه عمداً آن را ندارد
+$dump = ['mysqldump', '--defaults-extra-file=' . $defaultsFile, '--single-transaction', '--no-tablespaces', '--set-gtid-purged=OFF', '--default-character-set=utf8mb4', DB_NAME];
 runCommand($dump, null, $tempDir . '/database.sql');
 
 runCommand(['tar', '-czf', $tempDir . '/uploads.tar.gz', '-C', UPLOAD_DIR, '.']);

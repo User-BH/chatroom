@@ -1,0 +1,59 @@
+# فقط برای توسعه و تست. رمزهای این فایل مصنوعی هستند و نباید روی سرور واقعی استفاده شوند.
+#   docker compose up -d --build                      برنامه روی http://127.0.0.1:8080
+#   docker compose run --rm tests                     تست end-to-end
+#   docker compose run --rm tests php tests/webserver.php   تست Nginx و PHP-FPM
+#   docker compose down -v                            حذف کامل محیط
+
+services:
+  db:
+    image: ${MYSQL_IMAGE:-mysql:9.7}
+    environment:
+      MYSQL_ROOT_PASSWORD: local-root-password
+    volumes:
+      - ./database.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./docker/create-app-user.sql:/docker-entrypoint-initdb.d/02-app-user.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-plocal-root-password"]
+      interval: 3s
+      timeout: 5s
+      retries: 60
+
+  fpm:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: app
+    environment:
+      CHATROOM_DB_HOST: db
+      CHATROOM_DB_NAME: chatroom_secure
+      CHATROOM_DB_USER: chatroom
+      CHATROOM_DB_PASS: local-dev-password
+    depends_on:
+      db:
+        condition: service_healthy
+
+  nginx:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: web
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      - fpm
+
+  tests:
+    profiles: ["test"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: tests
+    command: ["php", "tests/run.php"]
+    environment:
+      CHATROOM_TEST_DB_HOST: db
+      CHATROOM_TEST_DB_USER: root
+      CHATROOM_TEST_DB_PASS: local-root-password
+      CHATROOM_TEST_WEB_BASE: http://nginx
+    depends_on:
+      db:
+        condition: service_healthy

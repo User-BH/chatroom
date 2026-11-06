@@ -1,5 +1,5 @@
 config.local.php
 uploads/*
-!uploads/.htaccess
+!uploads/.gitkeep
 logs/*
-!logs/.htaccess
+!logs/.gitkeep

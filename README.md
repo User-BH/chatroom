@@ -1,9 +1,9 @@
 # چت‌روم پیشرفته - نسخه 2.2
 
 ## نیازمندی‌ها
-- PHP 7.4 یا بالاتر با افزونه‌های `pdo_mysql`، `mbstring` و `fileinfo`
-- MySQL 5.7 یا بالاتر
-- Nginx یا Apache 2.4
+- PHP 8.5 با PHP-FPM و افزونه‌های `pdo_mysql`، `mbstring` و `fileinfo`
+- MySQL 8.4 یا 9.7
+- Nginx
 
 ## نصب و راه‌اندازی
 
@@ -39,10 +39,10 @@ chown -R www-data:www-data uploads logs
 chmod 750 uploads logs
 ```
 
-### 6. وب‌سرور
-- **Nginx:** از `deploy/nginx-chatroom.conf.example` استفاده کنید. قوانین `.htaccess` روی Nginx اثر ندارند.
-- **Apache:** فایل‌های `.htaccess` پروژه باید با `AllowOverride All` فعال باشند. دقت کنید این فایل‌ها هنگام انتقال جا نمانند (نام آن‌ها با نقطه شروع می‌شود).
-- **HTTPS:** بدون HTTPS رمز عبور و پیام‌ها روی شبکه قابل شنود هستند.
+### 6. Nginx
+از `deploy/nginx-chatroom.conf.example` استفاده کنید. دسترسی به `uploads` و `logs` و فایل‌های داخلی برنامه فقط با قوانین همین فایل بسته می‌شود.
+
+بدون HTTPS رمز عبور و پیام‌ها روی شبکه قابل شنود هستند.
 
 ### 7. فونت‌ها
 فونت Vazirmatn داخل پروژه است و از `assets/fonts/` لود می‌شود. برای نصب مرحله دانلودی وجود ندارد.
@@ -66,12 +66,21 @@ CHATROOM_DB_USER=root CHATROOM_DB_PASS=... php scripts/restore.php ARCHIVE.tar.g
 - `health.php` برای مانیتورینگ است و وضعیت دیتابیس و پوشه آپلود را می‌سنجد.
 - نمونه چرخش لاگ: `deploy/logrotate-chatroom.conf.example`
 
-## تست و CI
-تست‌ها روی MySQL یا MariaDB واقعی اجرا می‌شوند و یک دیتابیس موقت با پیشوند `chatroom_test_` می‌سازند:
+## توسعه و تست با Docker
 ```bash
-CHATROOM_TEST_DB_HOST=127.0.0.1 CHATROOM_TEST_DB_USER=root CHATROOM_TEST_DB_PASS=... php tests/run.php
+docker compose up -d --build
+docker compose run --rm tests
+docker compose run --rm tests php tests/webserver.php
+docker compose down -v
 ```
-GitHub Actions همین تست‌ها و ارتقا از schema اولیه را روی PHP 7.4 و 8.1 و 8.3 با MySQL 5.7 و 8.0 و MariaDB 10.11 اجرا می‌کند.
+برنامه روی `http://127.0.0.1:8080` با PHP-FPM، همان پیکربندی Nginx پروژه و MySQL بالا می‌آید. ساخت ادمین محلی:
+```bash
+docker compose exec fpm php scripts/admin-password.php localadmin
+```
+`tests/run.php` رفتار برنامه و `tests/webserver.php` قوانین Nginx و مسیر کامل کاربر را می‌سنجد. رمزهای `docker-compose.yml` فقط برای محیط محلی هستند.
+
+## CI
+GitHub Actions همین تست‌ها و ارتقا از schema اولیه را روی PHP 8.5 با MySQL 8.4 و 9.7 اجرا می‌کند.
 پس از قبولی روی `main` یا تگ، بسته انتشار (`tar.gz` و `sha256`) ساخته می‌شود؛ برای تگ `v*` به صورت GitHub Release هم منتشر می‌شود. استقرار روی سرور خودکار نیست.
 
 ---
@@ -122,7 +131,8 @@ chatroom/
 │   ├── backup.php         # پشتیبان دیتابیس و فایل‌ها
 │   └── restore.php        # بازیابی پشتیبان
 ├── migrations/            # ارتقای دیتابیس
-├── deploy/                # نمونه پیکربندی Nginx و logrotate
+├── deploy/                # پیکربندی Nginx و نمونه logrotate
+├── docker/                # محیط توسعه و تست
 ├── tests/                 # تست خودکار
 │
 ├── assets/
@@ -134,7 +144,7 @@ chatroom/
 │   └── fonts/
 │       └── (فونت‌های Vazirmatn)
 │
-├── uploads/               # فایل‌های آپلود شده (بدون دسترسی مستقیم از وب)
+├── uploads/               # فایل‌های آپلود شده (در Nginx بسته است)
 └── logs/                  # فایل‌های لاگ
 ```
 
@@ -158,8 +168,9 @@ chatroom/
 ---
 
 ## سازگاری
-- PHP 7.4+
-- MySQL 5.7+
+- PHP 8.5
+- MySQL 8.4 و 9.7
+- Nginx
 - بدون نیاز به لینک‌های خارجی (کاملاً لوکال)
 
 ---

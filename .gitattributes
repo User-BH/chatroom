@@ -2,6 +2,9 @@
 
 # این‌ها وارد بسته انتشار نمی‌شوند
 /tests export-ignore
+/docker export-ignore
+/docker-compose.yml export-ignore
+/.dockerignore export-ignore
 /.github export-ignore
 /.gitattributes export-ignore
 /.gitignore export-ignore

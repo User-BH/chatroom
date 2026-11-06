@@ -1,0 +1,27 @@
+# محیط توسعه و تست؛ تصمیم استقرار روی سرور واقعی جدا گرفته می‌شود.
+
+# ---------- برنامه روی PHP-FPM ----------
+FROM php:8.5-fpm AS app
+RUN docker-php-ext-install pdo_mysql
+COPY docker/php.ini /usr/local/etc/php/conf.d/chatroom.ini
+COPY . /var/www/chatroom
+WORKDIR /var/www/chatroom
+RUN mkdir -p uploads logs && chown -R www-data:www-data uploads logs && chmod 750 uploads logs
+
+# ---------- Nginx با همان پیکربندی پروژه ----------
+# بلوک ریدایرکت و خطوط TLS حذف می‌شوند؛ بقیه قوانین دقیقاً همان فایل deploy است
+FROM nginx:stable AS web
+COPY deploy/nginx-chatroom.conf.example /tmp/chatroom.conf
+RUN sed -e '0,/^}/d' \
+        -e 's/listen 443 ssl;/listen 80;/' \
+        -e '/ssl_/d' \
+        -e 's#unix:/run/php/php8.5-fpm.sock#fpm:9000#' \
+        /tmp/chatroom.conf > /etc/nginx/conf.d/default.conf
+COPY . /var/www/chatroom
+
+# ---------- تست‌ها با کلاینت رسمی MySQL ----------
+FROM app AS tests
+COPY --from=mysql:9.7 /usr/bin/mysql /usr/bin/mysqldump /usr/bin/
+RUN apt-get update -qq \
+    && apt-get install -y -qq --no-install-recommends libncurses6 > /dev/null \
+    && rm -rf /var/lib/apt/lists/*

@@ -4,7 +4,7 @@
  * ChatRoom - توابع کمکی و امنیتی
  * ===================================================
  * نسخه: 2.1
- * سازگار با: PHP 7.4+
+ * سازگار با: PHP 8.5
  * استفاده از: PDO
  */
 
@@ -843,6 +843,7 @@ function setSecurityHeaders() {
         return;
     }
     header("Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; media-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+    header_remove('X-Powered-By');
     header('X-Content-Type-Options: nosniff');
     header('X-Frame-Options: DENY');
     header('Referrer-Policy: same-origin');
@@ -858,7 +859,6 @@ function setSecurityHeaders() {
  * @return string
  */
 function hashPassword($password) {
-    // استفاده از BCRYPT برای سازگاری با PHP 7.4
     return password_hash($password, PASSWORD_BCRYPT, ['cost' => 12]);
 }
 
