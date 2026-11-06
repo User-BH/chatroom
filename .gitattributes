@@ -1,0 +1,7 @@
+*.woff2 binary
+
+# این‌ها وارد بسته انتشار نمی‌شوند
+/tests export-ignore
+/.github export-ignore
+/.gitattributes export-ignore
+/.gitignore export-ignore

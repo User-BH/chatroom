@@ -14,47 +14,49 @@ $success = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // بررسی CSRF
-    if (!validateCSRFToken($_POST[CSRF_TOKEN_NAME])) {
+    if (!validateCSRFToken($_POST[CSRF_TOKEN_NAME] ?? '')) {
         $error = 'توکن امنیتی نامعتبر است.';
     } else {
-        $name = cleanInput($_POST['name']);
-        $username = cleanInput($_POST['username']);
-        $password = $_POST['password'];
+        $name = cleanInput($_POST['name'] ?? '');
+        $username = cleanInput($_POST['username'] ?? '');
+        $password = postString('password');
         $isActive = isset($_POST['is_active']) ? 1 : 0;
-        
+
         // اعتبارسنجی
         $usernameErrors = validateUsername($username);
         $passwordErrors = validatePassword($password);
-        
-        if (empty($name)) {
+
+        if ($name === '') {
             $error = 'نام الزامی است.';
+        } elseif (mb_strlen($name, 'UTF-8') > 100) {
+            $error = 'نام نباید بیشتر از 100 کاراکتر باشد.';
         } elseif (!empty($usernameErrors)) {
-            $error = implode('<br>', $usernameErrors);
+            $error = implode('، ', $usernameErrors);
         } elseif (!empty($passwordErrors)) {
-            $error = implode('<br>', $passwordErrors);
+            $error = implode('، ', $passwordErrors);
         } else {
             // بررسی تکراری نبودن نام کاربری
             $stmt = $db->prepare("SELECT id FROM users WHERE username = :username");
             $stmt->execute([':username' => $username]);
-            
+
             if ($stmt->fetch()) {
                 $error = 'این نام کاربری قبلاً استفاده شده است.';
             } else {
                 // ایجاد کاربر
                 $hashedPassword = hashPassword($password);
-                
+
                 $stmt = $db->prepare("
                     INSERT INTO users (name, username, password, is_active, created_at)
                     VALUES (:name, :username, :password, :is_active, NOW())
                 ");
-                
+
                 $result = $stmt->execute([
                     ':name' => $name,
                     ':username' => $username,
                     ':password' => $hashedPassword,
                     ':is_active' => $isActive
                 ]);
-                
+
                 if ($result) {
                     $newUserId = $db->lastInsertId();
                     logSecurityEvent('user_created', $newUserId, $_SESSION['admin_id'], [
@@ -79,13 +81,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <link rel="stylesheet" href="assets/css/fonts.css">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        
+
         body {
             font-family: 'Vazirmatn', Tahoma, sans-serif;
             background: #f5f5f5;
             min-height: 100vh;
         }
-        
+
         .navbar {
             background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
             color: white;
@@ -94,11 +96,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             justify-content: space-between;
             align-items: center;
         }
-        
+
         .navbar h1 { font-size: 1.3rem; font-weight: 600; }
-        
+
         .navbar-links { display: flex; gap: 16px; align-items: center; }
-        
+
         .navbar-links a {
             color: rgba(255,255,255,0.8);
             text-decoration: none;
@@ -107,36 +109,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             border-radius: 8px;
             transition: all 0.3s;
         }
-        
+
         .navbar-links a:hover { background: rgba(255,255,255,0.1); color: white; }
         .navbar-links a.active { background: rgba(233, 69, 96, 0.8); color: white; }
-        
+
         .container { max-width: 600px; margin: 40px auto; padding: 0 20px; }
-        
+
         .card {
             background: white;
             border-radius: 16px;
             padding: 30px;
             box-shadow: 0 2px 8px rgba(0,0,0,0.05);
         }
-        
+
         .card h2 {
             font-size: 1.2rem;
             margin-bottom: 24px;
             color: #333;
         }
-        
+
         .form-group {
             margin-bottom: 20px;
         }
-        
+
         .form-group label {
             display: block;
             margin-bottom: 8px;
             font-weight: 500;
             color: #333;
         }
-        
+
         .form-group input {
             width: 100%;
             padding: 12px 16px;
@@ -146,23 +148,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             font-size: 1rem;
             transition: border-color 0.3s;
         }
-        
+
         .form-group input:focus {
             outline: none;
             border-color: #e94560;
         }
-        
+
         .checkbox-group {
             display: flex;
             align-items: center;
             gap: 10px;
         }
-        
+
         .checkbox-group input[type="checkbox"] {
             width: 20px;
             height: 20px;
         }
-        
+
         .btn {
             display: inline-block;
             padding: 14px 28px;
@@ -174,30 +176,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             cursor: pointer;
             transition: all 0.3s;
         }
-        
+
         .btn-primary {
             background: linear-gradient(135deg, #e94560, #ff6b6b);
             color: white;
         }
-        
+
         .btn-primary:hover {
             transform: translateY(-2px);
             box-shadow: 0 4px 15px rgba(233, 69, 96, 0.3);
         }
-        
+
         .alert {
             padding: 14px 18px;
             border-radius: 10px;
             margin-bottom: 20px;
             font-size: 0.9rem;
         }
-        
+
         .alert-error {
             background: #ffebee;
             color: #c62828;
             border: 1px solid #ffcdd2;
         }
-        
+
         .alert-success {
             background: #e8f5e9;
             color: #2e7d32;
@@ -208,52 +210,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <body>
     <nav class="navbar">
         <h1>پنل مدیریت</h1>
-        <div class="navbar-links">
-            <a href="admin.php">داشبورد</a>
-            <a href="admin-create-user.php" class="active">کاربر جدید</a>
-            <a href="admin-create-room.php">روم جدید</a>
-            <a href="admin-assign-user.php">تخصیص کاربر</a>
-            <a href="admin-logout.php">خروج</a>
-        </div>
+        <?php echo adminNavLinks('users'); ?>
     </nav>
-    
+
     <div class="container">
         <div class="card">
             <h2>ایجاد کاربر جدید</h2>
-            
+
             <?php if ($error): ?>
-                <div class="alert alert-error"><?php echo $error; ?></div>
+                <div class="alert alert-error"><?php echo sanitize($error); ?></div>
             <?php endif; ?>
-            
+
             <?php if ($success): ?>
                 <div class="alert alert-success"><?php echo sanitize($success); ?></div>
             <?php endif; ?>
-            
+
             <form method="POST">
                 <?php echo csrfField(); ?>
-                
+
                 <div class="form-group">
                     <label>نام کامل</label>
                     <input type="text" name="name" required placeholder="مثال: علی محمدی">
                 </div>
-                
+
                 <div class="form-group">
                     <label>نام کاربری (انگلیسی)</label>
                     <input type="text" name="username" required placeholder="مثال: ali_mohammadi" pattern="[a-zA-Z0-9_]+" dir="ltr">
                 </div>
-                
+
                 <div class="form-group">
                     <label>رمز عبور</label>
                     <input type="password" name="password" required placeholder="حداقل 8 کاراکتر با حرف بزرگ، کوچک و عدد">
                 </div>
-                
+
                 <div class="form-group">
                     <div class="checkbox-group">
                         <input type="checkbox" name="is_active" id="is_active" checked>
                         <label for="is_active" style="margin: 0;">حساب فعال باشد</label>
                     </div>
                 </div>
-                
+
                 <button type="submit" class="btn btn-primary">ایجاد کاربر</button>
             </form>
         </div>

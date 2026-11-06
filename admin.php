@@ -28,14 +28,14 @@ $stats['messages'] = $stmt->fetch()['total'];
 // کاربران آنلاین
 $stmt = $db->prepare("
     SELECT COUNT(*) as total FROM users 
-    WHERE status = 'online' OR last_seen > DATE_SUB(NOW(), INTERVAL :timeout SECOND)
+    WHERE is_active = 1 AND status <> 'offline' AND last_seen > DATE_SUB(NOW(), INTERVAL :timeout SECOND)
 ");
 $stmt->execute([':timeout' => ONLINE_TIMEOUT]);
 $stats['online'] = $stmt->fetch()['total'];
 
 // لیست کاربران
 $stmt = $db->query("
-    SELECT u.*, 
+    SELECT u.id, u.name, u.username, u.is_active,
            (SELECT COUNT(*) FROM users_rooms WHERE user_id = u.id) as room_count
     FROM users u 
     ORDER BY u.created_at DESC 
@@ -63,13 +63,13 @@ $recentRooms = $stmt->fetchAll();
     <link rel="stylesheet" href="assets/css/fonts.css">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        
+
         body {
             font-family: 'Vazirmatn', Tahoma, sans-serif;
             background: #f5f5f5;
             min-height: 100vh;
         }
-        
+
         .navbar {
             background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
             color: white;
@@ -78,11 +78,11 @@ $recentRooms = $stmt->fetchAll();
             justify-content: space-between;
             align-items: center;
         }
-        
+
         .navbar h1 { font-size: 1.3rem; font-weight: 600; }
-        
+
         .navbar-links { display: flex; gap: 16px; align-items: center; }
-        
+
         .navbar-links a {
             color: rgba(255,255,255,0.8);
             text-decoration: none;
@@ -91,59 +91,59 @@ $recentRooms = $stmt->fetchAll();
             border-radius: 8px;
             transition: all 0.3s;
         }
-        
+
         .navbar-links a:hover { background: rgba(255,255,255,0.1); color: white; }
         .navbar-links a.active { background: rgba(233, 69, 96, 0.8); color: white; }
-        
+
         .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
-        
+
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 20px;
             margin-bottom: 30px;
         }
-        
+
         .stat-card {
             background: white;
             border-radius: 16px;
             padding: 24px;
             box-shadow: 0 2px 8px rgba(0,0,0,0.05);
         }
-        
+
         .stat-card h3 {
             font-size: 0.85rem;
             color: #666;
             font-weight: 500;
             margin-bottom: 8px;
         }
-        
+
         .stat-card .value {
             font-size: 2rem;
             font-weight: 700;
             color: #1a1a2e;
         }
-        
+
         .stat-card.users .value { color: #3390ec; }
         .stat-card.rooms .value { color: #4fae4e; }
         .stat-card.messages .value { color: #e17076; }
         .stat-card.online .value { color: #eaa700; }
-        
+
         .section { margin-bottom: 30px; }
-        
+
         .section-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
             margin-bottom: 16px;
         }
-        
+
         .section-header h2 {
             font-size: 1.1rem;
             font-weight: 600;
             color: #333;
         }
-        
+
         .btn {
             display: inline-flex;
             align-items: center;
@@ -158,40 +158,40 @@ $recentRooms = $stmt->fetchAll();
             text-decoration: none;
             transition: all 0.3s;
         }
-        
+
         .btn-primary {
             background: linear-gradient(135deg, #e94560, #ff6b6b);
             color: white;
         }
-        
+
         .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 4px 15px rgba(233, 69, 96, 0.3); }
-        
+
         .table-card {
             background: white;
             border-radius: 16px;
             overflow: hidden;
             box-shadow: 0 2px 8px rgba(0,0,0,0.05);
         }
-        
+
         table { width: 100%; border-collapse: collapse; }
-        
+
         th, td {
             padding: 14px 16px;
             text-align: right;
             border-bottom: 1px solid #f0f0f0;
         }
-        
+
         th {
             background: #fafafa;
             font-weight: 600;
             font-size: 0.85rem;
             color: #666;
         }
-        
+
         td { font-size: 0.9rem; }
-        
+
         tr:last-child td { border-bottom: none; }
-        
+
         .status-badge {
             display: inline-block;
             padding: 4px 10px;
@@ -199,18 +199,18 @@ $recentRooms = $stmt->fetchAll();
             font-size: 0.75rem;
             font-weight: 500;
         }
-        
+
         .status-online { background: #e8f5e9; color: #2e7d32; }
         .status-offline { background: #f5f5f5; color: #666; }
         .status-active { background: #e3f2fd; color: #1565c0; }
         .status-inactive { background: #ffebee; color: #c62828; }
-        
+
         .grid-2 {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
             gap: 24px;
         }
-        
+
         @media (max-width: 768px) {
             .navbar { flex-direction: column; gap: 12px; }
             .grid-2 { grid-template-columns: 1fr; }
@@ -221,15 +221,9 @@ $recentRooms = $stmt->fetchAll();
 <body>
     <nav class="navbar">
         <h1>پنل مدیریت <?php echo SITE_NAME; ?></h1>
-        <div class="navbar-links">
-            <a href="admin.php" class="active">داشبورد</a>
-            <a href="admin-create-user.php">کاربر جدید</a>
-            <a href="admin-create-room.php">روم جدید</a>
-            <a href="admin-assign-user.php">تخصیص کاربر</a>
-            <a href="admin-logout.php">خروج</a>
-        </div>
+        <?php echo adminNavLinks('dashboard'); ?>
     </nav>
-    
+
     <div class="container">
         <!-- Stats -->
         <div class="stats-grid">
@@ -250,7 +244,7 @@ $recentRooms = $stmt->fetchAll();
                 <div class="value"><?php echo number_format($stats['online']); ?></div>
             </div>
         </div>
-        
+
         <div class="grid-2">
             <!-- Recent Users -->
             <div class="section">
@@ -273,7 +267,7 @@ $recentRooms = $stmt->fetchAll();
                             <tr>
                                 <td><?php echo sanitize($u['name']); ?></td>
                                 <td><?php echo sanitize($u['username']); ?></td>
-                                <td><?php echo $u['room_count']; ?></td>
+                                <td><?php echo (int)$u['room_count']; ?></td>
                                 <td>
                                     <?php if ($u['is_active']): ?>
                                         <span class="status-badge status-active">فعال</span>
@@ -287,7 +281,7 @@ $recentRooms = $stmt->fetchAll();
                     </table>
                 </div>
             </div>
-            
+
             <!-- Recent Rooms -->
             <div class="section">
                 <div class="section-header">
@@ -308,7 +302,7 @@ $recentRooms = $stmt->fetchAll();
                             <?php foreach ($recentRooms as $r): ?>
                             <tr>
                                 <td><?php echo sanitize($r['name']); ?></td>
-                                <td><?php echo $r['member_count']; ?></td>
+                                <td><?php echo (int)$r['member_count']; ?></td>
                                 <td><?php echo number_format($r['message_count']); ?></td>
                                 <td>
                                     <?php if ($r['is_active']): ?>

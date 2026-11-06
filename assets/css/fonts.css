@@ -1,22 +1,11 @@
 /**
- * فونت‌های لوکال - Vazirmatn
- * ===================================
- * فونت‌ها را در پوشه assets/fonts/ قرار دهید
- * 
- * فایل‌های مورد نیاز:
- * - Vazirmatn-Light.woff2
- * - Vazirmatn-Regular.woff2
- * - Vazirmatn-Medium.woff2
- * - Vazirmatn-SemiBold.woff2
- * - Vazirmatn-Bold.woff2
- * 
- * دانلود از: https://github.com/rastikerdar/vazirmatn/releases
+ * فونت Vazirmatn (نسخه v33.003، مجوز OFL در assets/fonts/OFL.txt)
+ * فایل‌ها داخل پروژه هستند و فقط از همین سرور لود می‌شوند.
  */
 
 @font-face {
     font-family: 'Vazirmatn';
-    src: url('../fonts/Vazirmatn-Light.woff2') format('woff2'),
-         url('../fonts/Vazirmatn-Light.woff') format('woff');
+    src: url('../fonts/Vazirmatn-Light.woff2') format('woff2');
     font-weight: 300;
     font-style: normal;
     font-display: swap;
@@ -24,8 +13,7 @@
 
 @font-face {
     font-family: 'Vazirmatn';
-    src: url('../fonts/Vazirmatn-Regular.woff2') format('woff2'),
-         url('../fonts/Vazirmatn-Regular.woff') format('woff');
+    src: url('../fonts/Vazirmatn-Regular.woff2') format('woff2');
     font-weight: 400;
     font-style: normal;
     font-display: swap;
@@ -33,8 +21,7 @@
 
 @font-face {
     font-family: 'Vazirmatn';
-    src: url('../fonts/Vazirmatn-Medium.woff2') format('woff2'),
-         url('../fonts/Vazirmatn-Medium.woff') format('woff');
+    src: url('../fonts/Vazirmatn-Medium.woff2') format('woff2');
     font-weight: 500;
     font-style: normal;
     font-display: swap;
@@ -42,8 +29,7 @@
 
 @font-face {
     font-family: 'Vazirmatn';
-    src: url('../fonts/Vazirmatn-SemiBold.woff2') format('woff2'),
-         url('../fonts/Vazirmatn-SemiBold.woff') format('woff');
+    src: url('../fonts/Vazirmatn-SemiBold.woff2') format('woff2');
     font-weight: 600;
     font-style: normal;
     font-display: swap;
@@ -51,8 +37,7 @@
 
 @font-face {
     font-family: 'Vazirmatn';
-    src: url('../fonts/Vazirmatn-Bold.woff2') format('woff2'),
-         url('../fonts/Vazirmatn-Bold.woff') format('woff');
+    src: url('../fonts/Vazirmatn-Bold.woff2') format('woff2');
     font-weight: 700;
     font-style: normal;
     font-display: swap;

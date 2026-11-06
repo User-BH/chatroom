@@ -1,37 +1,23 @@
 <?php
 /**
  * API آپلود فایل
- * چت روم پیشرفته - نسخه 2.0
+ * چت روم پیشرفته - نسخه 2.1
  * سازگار با PHP 7.4+
  */
 
+define('API_REQUEST', true);
 require_once __DIR__ . '/functions.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
-// فقط POST
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    jsonError('متد نامعتبر', 405);
-}
-
-// بررسی ورود
-if (!isUserLoggedIn()) {
-    jsonError('لطفاً وارد شوید', 401);
-}
-
-// اعتبارسنجی CSRF
-if (!validateCSRFToken($_POST[CSRF_TOKEN_NAME] ?? '')) {
-    jsonError('درخواست نامعتبر', 403);
-}
-
-// Rate Limiting
-if (!checkRateLimit('upload_' . $_SESSION['user_id'], 10, 60)) {
-    jsonError('تعداد آپلودها بیش از حد مجاز است', 429);
-}
-
-$userId = $_SESSION['user_id'];
-$roomId = $_SESSION['room_id'];
+$access = requireChatApiAccess('POST', 'upload', 10);
+$userId = $access['user_id'];
+$roomId = $access['room_id'];
 $db = getDB();
+
+if (isMembershipMuted($access['membership'])) {
+    jsonError('شما در این روم ساکت شده‌اید', 403);
+}
 
 // بررسی وجود فایل
 if (!isset($_FILES['file']) || $_FILES['file']['error'] === UPLOAD_ERR_NO_FILE) {
@@ -40,92 +26,86 @@ if (!isset($_FILES['file']) || $_FILES['file']['error'] === UPLOAD_ERR_NO_FILE) 
 
 $file = $_FILES['file'];
 
-// تشخیص نوع فایل
-$finfo = new finfo(FILEINFO_MIME_TYPE);
-$mimeType = $finfo->file($file['tmp_name']);
-
-// تعیین نوع
-$fileType = 'file';
-if (in_array($mimeType, getAllowedImageTypes())) {
-    $fileType = 'image';
-} elseif (in_array($mimeType, getAllowedAudioTypes())) {
-    $fileType = 'audio';
-} elseif (in_array($mimeType, getAllowedFileTypes())) {
-    $fileType = 'file';
-} else {
-    jsonError('نوع فایل مجاز نیست');
+// بررسی فایل و تشخیص نوع واقعی از روی محتوا
+$inspection = inspectUploadedFile($file);
+if ($inspection['error'] !== '') {
+    jsonError($inspection['error']);
 }
 
-// اعتبارسنجی فایل
-$errors = validateUploadedFile($file, $fileType);
-if (!empty($errors)) {
-    jsonError(implode(', ', $errors));
+$caption = trim(postString('caption'));
+if ($caption !== '') {
+    $captionError = validateMessageText($caption);
+    if ($captionError !== '') {
+        jsonError($captionError);
+    }
 }
+
+$filePath = null;
 
 try {
-    // بررسی عضویت در روم
-    $stmt = $db->prepare("SELECT is_muted FROM users_rooms WHERE user_id = :user_id AND room_id = :room_id");
-    $stmt->execute([':user_id' => $userId, ':room_id' => $roomId]);
-    $membership = $stmt->fetch();
-    
-    if (!$membership) {
-        jsonError('شما عضو این روم نیستید', 403);
+    // سهمیه روزانه؛ فایل‌های حذف‌شده هم حساب می‌شوند چون هنوز روی دیسک هستند
+    $stmt = $db->prepare("
+        SELECT COALESCE(SUM(file_size), 0) AS used
+        FROM messages
+        WHERE user_id = :user_id AND created_at > DATE_SUB(NOW(), INTERVAL :seconds SECOND)
+    ");
+    $stmt->execute([':user_id' => $userId, ':seconds' => 86400]);
+    if ((int)$stmt->fetch()['used'] + (int)$file['size'] > UPLOAD_DAILY_QUOTA) {
+        jsonError('سهمیه آپلود روزانه شما تمام شده است.', 429);
     }
-    
-    if ($membership['is_muted']) {
-        jsonError('شما در این روم ساکت شده‌اید', 403);
-    }
-    
+
     // ایجاد پوشه آپلود اگر وجود ندارد
-    $uploadDir = UPLOAD_DIR . date('Y/m/');
-    if (!is_dir($uploadDir)) {
-        mkdir($uploadDir, 0755, true);
+    $subDir = date('Y/m/');
+    $uploadDir = UPLOAD_DIR . $subDir;
+    if (!is_dir($uploadDir) && !mkdir($uploadDir, 0750, true) && !is_dir($uploadDir)) {
+        error_log('Upload error: cannot create directory ' . $uploadDir);
+        jsonError('خطا در ذخیره فایل', 500);
     }
-    
-    // تولید نام فایل امن
-    $newFileName = generateSecureFileName($file['name']);
+
+    // پسوند از فهرست سفید نوع فایل می‌آید
+    $newFileName = generateSecureFileName($inspection['info']['ext']);
     $filePath = $uploadDir . $newFileName;
-    $relativePath = 'uploads/' . date('Y/m/') . $newFileName;
-    
+    $relativePath = $subDir . $newFileName;
+    $originalName = cleanOriginalFileName($file['name']);
+
     // انتقال فایل
     if (!move_uploaded_file($file['tmp_name'], $filePath)) {
-        jsonError('خطا در ذخیره فایل');
+        $filePath = null;
+        jsonError('خطا در ذخیره فایل', 500);
     }
-    
+    chmod($filePath, 0640);
+
     // ذخیره پیام در دیتابیس
-    $caption = isset($_POST['caption']) ? cleanInput($_POST['caption']) : '';
-    
     $stmt = $db->prepare("
-        INSERT INTO messages (room_id, user_id, message, message_type, file_path, file_name, file_size, created_at)
-        VALUES (:room_id, :user_id, :message, :type, :path, :name, :size, NOW())
+        INSERT INTO messages (room_id, user_id, message, message_type, file_path, file_name, file_size, file_mime, created_at)
+        VALUES (:room_id, :user_id, :message, :type, :path, :name, :size, :mime, NOW())
     ");
-    
-    $result = $stmt->execute([
+
+    $stmt->execute([
         ':room_id' => $roomId,
         ':user_id' => $userId,
         ':message' => $caption,
-        ':type' => $fileType,
+        ':type' => $inspection['info']['type'],
         ':path' => $relativePath,
-        ':name' => $file['name'],
-        ':size' => $file['size']
+        ':name' => $originalName,
+        ':size' => $file['size'],
+        ':mime' => $inspection['mime']
     ]);
-    
-    if ($result) {
-        $messageId = $db->lastInsertId();
-        
-        jsonSuccess([
-            'message_id' => (int)$messageId,
-            'file_path' => $relativePath,
-            'file_name' => $file['name'],
-            'file_type' => $fileType
-        ], 'فایل آپلود شد');
-    } else {
-        // حذف فایل در صورت خطا
-        unlink($filePath);
-        jsonError('خطا در ذخیره اطلاعات فایل');
-    }
-    
+
+    $messageId = (int)$db->lastInsertId();
+
+    jsonSuccess([
+        'message_id' => $messageId,
+        'file_url' => 'download.php?id=' . $messageId,
+        'file_name' => $originalName,
+        'file_type' => $inspection['info']['type']
+    ], 'فایل آپلود شد');
+
 } catch (PDOException $e) {
+    // فایل بدون رکورد دیتابیس روی دیسک نماند
+    if ($filePath !== null && is_file($filePath)) {
+        unlink($filePath);
+    }
     error_log("Upload file error: " . $e->getMessage());
     jsonError('خطا در آپلود فایل', 500);
 }

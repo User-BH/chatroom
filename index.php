@@ -241,7 +241,7 @@ if (isAdminLoggedIn()) {
                 <h2>به چت‌روم خوش آمدید</h2>
                 <p>با دوستان و همکاران خود در ارتباط باشید</p>
             </div>
-            
+
             <div class="card-body">
                 <div class="feature-list">
                     <div class="feature-item">
@@ -252,10 +252,10 @@ if (isAdminLoggedIn()) {
                         </div>
                         <div class="feature-text">
                             <h3>امنیت بالا</h3>
-                            <p>رمزنگاری پیشرفته و حفاظت از اطلاعات</p>
+                            <p>رمز عبور هش‌شده و دسترسی فقط برای اعضا</p>
                         </div>
                     </div>
-                    
+
                     <div class="feature-item">
                         <div class="feature-icon">
                             <svg viewBox="0 0 24 24">
@@ -267,7 +267,7 @@ if (isAdminLoggedIn()) {
                             <p>پاسخ به پیام‌های خاص در گفتگوها</p>
                         </div>
                     </div>
-                    
+
                     <div class="feature-item">
                         <div class="feature-icon">
                             <svg viewBox="0 0 24 24">
