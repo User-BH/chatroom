@@ -1,0 +1,15 @@
+{
+  "name": "چت روم امن",
+  "short_name": "چت روم",
+  "start_url": "chat.php",
+  "scope": "./",
+  "display": "standalone",
+  "dir": "rtl",
+  "lang": "fa",
+  "background_color": "#0f0f23",
+  "theme_color": "#16213e",
+  "icons": [
+    { "src": "assets/images/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "assets/images/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

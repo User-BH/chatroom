@@ -17,7 +17,7 @@ $stmt = $db->query("SELECT id, name, username FROM users WHERE is_active = 1 ORD
 $users = $stmt->fetchAll();
 
 // دریافت لیست روم‌ها
-$stmt = $db->query("SELECT id, name FROM rooms WHERE is_active = 1 ORDER BY name");
+$stmt = $db->query("SELECT id, name FROM rooms WHERE is_active = 1 AND type = 'group' ORDER BY name");
 $rooms = $stmt->fetchAll();
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -43,7 +43,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmt->execute([':id' => $userId]);
             $userExists = $stmt->fetch();
 
-            $stmt = $db->prepare("SELECT id FROM rooms WHERE id = :id AND is_active = 1");
+            $stmt = $db->prepare("SELECT id FROM rooms WHERE id = :id AND is_active = 1 AND type = 'group'");
             $stmt->execute([':id' => $roomId]);
             $roomExists = $stmt->fetch();
 
@@ -106,7 +106,7 @@ $stmt = $db->query("
     SELECT ur.*, u.name as user_name, u.username, r.name as room_name
     FROM users_rooms ur
     JOIN users u ON ur.user_id = u.id
-    JOIN rooms r ON ur.room_id = r.id
+    JOIN rooms r ON ur.room_id = r.id AND r.type = 'group'
     ORDER BY ur.joined_at DESC
     LIMIT 20
 ");

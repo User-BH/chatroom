@@ -21,6 +21,9 @@ $success = '';
 if (isset($_GET['logout']) && $_GET['logout'] === '1') {
     $success = 'با موفقیت از سیستم خارج شدید.';
 }
+if (isset($_GET['invite'])) {
+    $success = 'برای پیوستن به روم، وارد حساب خود شوید.';
+}
 if (isset($_GET['error']) && $_GET['error'] === 'session') {
     $error = 'نشست شما منقضی شده است. لطفاً دوباره وارد شوید.';
 }
@@ -95,6 +98,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'session_version' => (int)$account['session_version'],
                 'expires' => time() + PENDING_LOGIN_TTL
             ];
+
+            // کاربر با لینک دعوت آمده و هویتش تایید شد: مستقیم وارد همان روم می‌شود
+            $invite = findValidInvite($_SESSION['pending_invite'] ?? '');
+            unset($_SESSION['pending_invite']);
+            if ($invite && redeemInvite((int)$account['id'], $invite)) {
+                completeLogin($pending, (int)$invite['room_id']);
+            }
 
             $userRooms = getUserRooms((int)$account['id']);
 

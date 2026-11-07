@@ -1,7 +1,7 @@
 <?php
 /**
  * API حذف پیام
- * چت روم پیشرفته - نسخه 2.1
+ * چت روم پیشرفته - نسخه 3.0
  * سازگار با PHP 8.5
  */
 
@@ -38,15 +38,20 @@ try {
 
     // فقط صاحب پیام یا مدیر همین روم می‌تواند حذف کند
     $isOwner = (int)$message['user_id'] === $userId;
-    $isModerator = in_array($access['membership']['role'], ['admin', 'moderator'], true);
+    $isModerator = in_array($access['membership']['role'], ['admin', 'moderator'], true)
+        && $access['membership']['type'] !== 'direct';
 
     if (!$isOwner && !$isModerator) {
         jsonError('شما مجاز به حذف این پیام نیستید', 403);
     }
 
-    // حذف نرم (soft delete)
-    $stmt = $db->prepare("UPDATE messages SET is_deleted = 1, deleted_at = NOW() WHERE id = :id AND room_id = :room_id");
+    $db->beginTransaction();
+    // حذف نرم؛ پاکسازی نهایی با scripts/cleanup.php انجام می‌شود
+    $stmt = $db->prepare("UPDATE messages SET is_deleted = 1, deleted_at = NOW(), pinned_at = NULL, pinned_by = NULL WHERE id = :id AND room_id = :room_id");
     $stmt->execute([':id' => $messageId, ':room_id' => $roomId]);
+    recordRoomEvent($roomId, 'message_delete', $messageId, $userId);
+    recordRoomEvent($roomId, 'pin', $messageId, $userId);
+    $db->commit();
 
     if (!$isOwner) {
         logSecurityEvent('message_deleted_by_moderator', $userId, null, [
@@ -58,6 +63,9 @@ try {
     jsonSuccess(['message_id' => $messageId], 'پیام حذف شد');
 
 } catch (PDOException $e) {
+    if ($db->inTransaction()) {
+        $db->rollBack();
+    }
     error_log("Delete message error: " . $e->getMessage());
     jsonError('خطا در حذف پیام', 500);
 }

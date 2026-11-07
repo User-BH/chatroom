@@ -1,4 +1,4 @@
-# چت‌روم پیشرفته - نسخه 2.2
+# چت‌روم پیشرفته - نسخه 3.0
 
 ## نیازمندی‌ها
 - PHP 8.5 با PHP-FPM و افزونه‌های `pdo_mysql`، `mbstring` و `fileinfo`
@@ -39,8 +39,12 @@ chown -R www-data:www-data uploads logs
 chmod 750 uploads logs
 ```
 
-### 6. Nginx
-از `deploy/nginx-chatroom.conf.example` استفاده کنید. دسترسی به `uploads` و `logs` و فایل‌های داخلی برنامه فقط با قوانین همین فایل بسته می‌شود.
+### 6. Nginx و PHP-FPM
+از `deploy/nginx-chatroom.conf.example` و `deploy/php-fpm-chatroom.conf.example` استفاده کنید. دسترسی به `uploads` و `logs` و فایل‌های داخلی برنامه فقط با قوانین Nginx بسته می‌شود.
+
+SSE پول جدای PHP-FPM دارد تا اتصال‌های باز جلوی بقیه درخواست‌ها را نگیرند. سقف اتصال در Nginx (`limit_conn`) نباید از `pm.max_children` پول `chatroom-sse` بیشتر باشد؛ بیشتر از این سقف، کلاینت خودکار به polling برمی‌گردد. SSE در حالت بیکار به دیتابیس وصل نمی‌ماند و با فایل سیگنال `EVENT_SIGNAL_FILE` از رویداد جدید خبردار می‌شود؛ هر دو پول باید به این فایل دسترسی داشته باشند.
+
+PWA، ضبط پیام صوتی و کپی با Clipboard API فقط روی HTTPS کار می‌کنند.
 
 بدون HTTPS رمز عبور و پیام‌ها روی شبکه قابل شنود هستند.
 
@@ -62,6 +66,12 @@ CHATROOM_DB_USER=root CHATROOM_DB_PASS=... php scripts/restore.php ARCHIVE.tar.g
 ```
 به `mysqldump`، `mysql` و `tar` نیاز دارد. متن پیام‌ها داخل فایل پشتیبان رمزنگاری نشده است.
 
+### نگهداری پیام
+این دستور را روزانه با cron اجرا کنید. پیام حذف‌شده پس از 30 روز و پیام قدیمی‌تر از مدت نگهداری روم، همراه فایلش برای همیشه پاک می‌شود. مدت هر روم در صفحه ویرایش آن تعیین می‌شود.
+```bash
+php scripts/cleanup.php
+```
+
 ### سلامت و لاگ
 - `health.php` برای مانیتورینگ است و وضعیت دیتابیس و پوشه آپلود را می‌سنجد.
 - نمونه چرخش لاگ: `deploy/logrotate-chatroom.conf.example`
@@ -77,7 +87,11 @@ docker compose down -v
 ```bash
 docker compose exec fpm php scripts/admin-password.php localadmin
 ```
-`tests/run.php` رفتار برنامه و `tests/webserver.php` قوانین Nginx و مسیر کامل کاربر را می‌سنجد. رمزهای `docker-compose.yml` فقط برای محیط محلی هستند.
+`tests/run.php` رفتار برنامه، `tests/webserver.php` قوانین Nginx، SSE و مسیر کامل کاربر و `tests/load.php` ظرفیت همگام‌سازی را می‌سنجد:
+```bash
+docker compose run --rm tests php tests/load.php --users=100 --mode=sse --seconds=40
+```
+ رمزهای `docker-compose.yml` فقط برای محیط محلی هستند.
 
 ## CI
 GitHub Actions همین تست‌ها و ارتقا از schema اولیه را روی PHP 8.5 با MySQL 8.4 و 9.7 اجرا می‌کند.
@@ -106,6 +120,17 @@ chatroom/
 ├── upload_file.php        # API آپلود فایل
 ├── download.php           # دانلود کنترل‌شده فایل
 ├── health.php             # بررسی سلامت
+├── sync.php               # همگام‌سازی با polling
+├── events.php             # همگام‌سازی با SSE
+├── mark_read.php          # ثبت خوانده شدن
+├── react_message.php      # واکنش
+├── pin_message.php        # سنجاق
+├── search_messages.php    # جست‌وجو
+├── room_members.php       # پیشنهاد منشن
+├── contacts.php           # هم‌روم‌ها
+├── start_direct.php       # گفتگوی خصوصی
+├── join.php               # پیوستن با لینک دعوت
+├── manifest.webmanifest, sw.js, offline.html  # PWA
 ├── change-password.php    # تغییر رمز کاربر
 │
 ├── admin-login.php        # ورود ادمین
@@ -123,21 +148,24 @@ chatroom/
 ├── admin-change-password.php # تغییر رمز ادمین
 │
 ├── includes/
-│   └── init.php           # فایل راه‌اندازی
+│   ├── init.php           # فایل راه‌اندازی
+│   └── chat.php           # منطق مشترک چت
 │
 ├── scripts/
 │   ├── admin-password.php # ساخت ادمین و تغییر رمز
 │   ├── migrate.php        # اجرای مایگریشن‌ها
 │   ├── backup.php         # پشتیبان دیتابیس و فایل‌ها
-│   └── restore.php        # بازیابی پشتیبان
+│   ├── restore.php        # بازیابی پشتیبان
+│   └── cleanup.php        # نگهداری پیام
 ├── migrations/            # ارتقای دیتابیس
-├── deploy/                # پیکربندی Nginx و نمونه logrotate
+├── deploy/                # پیکربندی Nginx، PHP-FPM و نمونه logrotate
 ├── docker/                # محیط توسعه و تست
 ├── tests/                 # تست خودکار
 │
 ├── assets/
 │   ├── css/
 │   │   ├── fonts.css      # تعریف فونت‌ها
+│   │   ├── chat.css       # ظاهر چت
 │   │   └── admin.css      # ظاهر پنل مدیریت
 │   ├── js/
 │   │   └── chat-app.js    # منطق صفحه چت

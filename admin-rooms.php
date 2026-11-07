@@ -13,7 +13,7 @@ const ADMIN_ROOMS_PER_PAGE = 25;
 $db = getDB();
 $page = validatePositiveInt($_GET['page'] ?? 1) ?: 1;
 
-$total = (int)$db->query("SELECT COUNT(*) AS total FROM rooms")->fetch()['total'];
+$total = (int)$db->query("SELECT COUNT(*) AS total FROM rooms WHERE type = 'group'")->fetch()['total'];
 $totalPages = max(1, (int)ceil($total / ADMIN_ROOMS_PER_PAGE));
 $page = min($page, $totalPages);
 
@@ -22,6 +22,7 @@ $stmt = $db->prepare("
            (SELECT COUNT(*) FROM users_rooms WHERE room_id = r.id) AS member_count,
            (SELECT COUNT(*) FROM messages WHERE room_id = r.id AND is_deleted = 0) AS message_count
     FROM rooms r
+    WHERE r.type = 'group'
     ORDER BY r.created_at DESC, r.id DESC
     LIMIT :limit OFFSET :offset
 ");

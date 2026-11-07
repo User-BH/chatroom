@@ -49,7 +49,7 @@ $forbidden = [
     'database.sql', 'README.md', 'docker-compose.yml', '.gitignore', '.dockerignore', '.git/config',
     'assets/fonts/README.md', 'assets/fonts/OFL.txt',
     'includes/init.php', 'scripts/backup.php', 'scripts/migrate.php', 'scripts/admin-password.php',
-    'migrations/001_security_hardening.sql', 'tests/run.php', 'deploy/nginx-chatroom.conf.example',
+    'migrations/001_security_hardening.sql', 'tests/run.php', 'deploy/nginx-chatroom.conf.example', 'deploy/php-fpm-chatroom.conf.example', 'scripts/cleanup.php', 'includes/chat.php',
     'docker/php.ini', 'logs/error.log', 'logs/', 'uploads/', 'uploads/x.php', 'uploads/x.jpg/y.php',
 ];
 foreach ($forbidden as $path) {
@@ -111,6 +111,92 @@ check('فایل 11 مگابایتی را برنامه رد می‌کند', $r['s
 file_put_contents($big, 'GIF89a' . str_repeat("\0", 13 * 1024 * 1024));
 $r = $user->api('POST', 'upload_file.php', ['file' => new CURLFile($big, 'image/gif', 'big.gif')]);
 check('فایل 13 مگابایتی را Nginx رد می‌کند', $r['status'] === 413, (string)$r['status']);
+
+section('SSE روی Nginx و پول جدا');
+$cursor = (int)$user->api('GET', 'get_messages.php?last_id=0')['json']['data']['cursor'];
+$received = '';
+$headersText = '';
+$stream = curl_init("$base/events.php?room_id=$roomId&cursor=$cursor");
+curl_setopt_array($stream, [
+    CURLOPT_COOKIEFILE => $user->jarPath(),
+    CURLOPT_USERAGENT => 'chatroom-test',
+    CURLOPT_NOPROXY => '*',
+    CURLOPT_TIMEOUT => 6,
+    CURLOPT_HEADERFUNCTION => function ($h, $line) use (&$headersText) {
+        $headersText .= $line;
+        return strlen($line);
+    },
+    CURLOPT_WRITEFUNCTION => function ($h, $chunk) use (&$received) {
+        $received .= $chunk;
+        return strlen($chunk);
+    },
+]);
+$multi = curl_multi_init();
+curl_multi_add_handle($multi, $stream);
+$marker = 'SSE-' . bin2hex(random_bytes(4));
+$sentAt = null;
+$arrivedAfter = null;
+$started = monotonicSeconds();
+do {
+    curl_multi_exec($multi, $running);
+    curl_multi_select($multi, 0.05);
+    if ($sentAt === null && monotonicSeconds() - $started > 1) {
+        $t = monotonicSeconds();
+        $user->api('POST', 'send_message.php', ['message' => $marker]);
+        $sendSeconds = monotonicSeconds() - $t;
+        $sentAt = monotonicSeconds();
+    }
+    if ($arrivedAfter === null && $sentAt !== null && strpos($received, $marker) !== false) {
+        $arrivedAfter = monotonicSeconds() - $sentAt;
+    }
+} while ($running && monotonicSeconds() - $started < 7);
+curl_multi_remove_handle($multi, $stream);
+check('ارسال هم‌زمان با SSE باز سریع است', ($sendSeconds ?? 99) < 1, sprintf('%.2fs', $sendSeconds ?? 99));
+check('پاسخ SSE نوع درست دارد', stripos($headersText, 'text/event-stream') !== false, $headersText);
+check('پیام با SSE می‌رسد', $arrivedAfter !== null, 'cursor=' . $cursor . ' ' . curl_getinfo($stream, CURLINFO_RESPONSE_CODE) . ' ' . substr(str_replace("
+", '|', $received), 0, 900));
+check('پیام زیر 3 ثانیه می‌رسد', $arrivedAfter !== null && $arrivedAfter < 3, (string)$arrivedAfter);
+check('رویداد شناسه دارد', preg_match('/^id: \d+$/m', $received) === 1);
+check('SSE بدون ورود 401 است', $anon->req('GET', 'events.php')['status'] === 401);
+
+// پر شدن SSE نباید پول اصلی را بگیرد
+$multi = curl_multi_init();
+$handles = [];
+for ($i = 0; $i < 30; $i++) {
+    $h = curl_init("$base/events.php?room_id=$roomId&cursor=$cursor");
+    curl_setopt_array($h, [
+        CURLOPT_COOKIEFILE => $user->jarPath(),
+        CURLOPT_USERAGENT => 'chatroom-test',
+        CURLOPT_NOPROXY => '*',
+        CURLOPT_TIMEOUT => 5,
+        CURLOPT_WRITEFUNCTION => function ($h, $chunk) {
+            return strlen($chunk);
+        },
+    ]);
+    curl_multi_add_handle($multi, $h);
+    $handles[] = $h;
+}
+$started = monotonicSeconds();
+while (monotonicSeconds() - $started < 2) {
+    curl_multi_exec($multi, $running);
+    curl_multi_select($multi, 0.05);
+}
+$threads = (int)$pdo->query("SHOW STATUS LIKE 'Threads_connected'")->fetch(PDO::FETCH_NUM)[1];
+check('SSE بیکار اتصال دیتابیس نگه نمی‌دارد', $threads < 15, (string)$threads);
+$t = monotonicSeconds();
+$r = $anon->req('GET', 'login.php');
+$elapsed = monotonicSeconds() - $t;
+check('با 30 اتصال SSE باز، صفحات عادی سریع می‌مانند', $r['status'] === 200 && $elapsed < 1, sprintf('%.2fs', $elapsed));
+foreach ($handles as $h) {
+    curl_multi_remove_handle($multi, $h);
+}
+
+section('فایل‌های PWA روی Nginx');
+$r = $anon->req('GET', 'manifest.webmanifest');
+check('manifest سرو می‌شود', $r['status'] === 200 && stripos($r['headers'], 'manifest') !== false, $r['headers']);
+$r = $anon->req('GET', 'sw.js');
+check('sw.js با no-cache سرو می‌شود', $r['status'] === 200 && stripos($r['headers'], 'no-cache') !== false && stripos($r['headers'], 'javascript') !== false, $r['headers']);
+check('offline.html سرو می‌شود', $anon->req('GET', 'offline.html')['status'] === 200);
 
 section('مسیر کامل ادمین');
 $admin = $newClient();

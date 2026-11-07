@@ -555,6 +555,326 @@ $adminDbEnv = ['CHATROOM_DB_USER' => $dbAdminUser, 'CHATROOM_DB_PASS' => (string
 $r = $runCli(['scripts/migrate.php'], $adminDbEnv);
 check('database.sql همه مایگریشن‌ها را دارد', $r['exit'] === 0 && strpos($r['out'], 'Nothing to migrate') !== false, $r['out']);
 
+section('چند روم در تب‌های هم‌زمان');
+$insUser = $pdo->prepare("INSERT INTO users (id, username, password, name, is_active) VALUES (?, ?, ?, ?, 1)");
+foreach ([[20, 'henry', 'هنری'], [21, 'ivy', 'آیوی'], [22, 'jack', 'جک'], [23, 'kate', 'کیت'], [24, 'liam', 'لیام'], [25, 'mona', 'مونا']] as [$id, $u, $n]) {
+    $insUser->execute([$id, $u, $hash, $n]);
+}
+$pdo->exec("INSERT INTO rooms (id, name) VALUES (10, 'TeamRoom'), (11, 'SideRoom'), (12, 'RetentionRoom')");
+$pdo->exec("INSERT INTO users_rooms (user_id, room_id, role) VALUES
+    (20, 10, 'moderator'), (20, 11, 'member'), (20, 12, 'member'),
+    (21, 10, 'member'), (22, 10, 'member'), (23, 11, 'member'), (24, 12, 'member'), (25, 12, 'member')");
+$henry = $newClient();
+$henry->login('henry', $pw, 10);
+$ivy = $newClient();
+$ivy->login('ivy');
+$jack = $newClient();
+$jack->login('jack');
+$kate = $newClient();
+$kate->login('kate');
+check('کاربر چند رومی بعد از انتخاب وارد چت می‌شود', $henry->csrf !== '');
+$r = $henry->api('POST', 'send_message.php', ['room_id' => 11, 'message' => 'در روم دوم']);
+$sideMsg = $r['json']['data']['message_id'] ?? 0;
+check('پیام به روم همان تب می‌رود نه روم session', (int)$pdo->query("SELECT room_id FROM messages WHERE id = " . (int)$sideMsg)->fetchColumn() === 11, $r['body']);
+$r = $henry->api('POST', 'send_message.php', ['message' => 'بدون پارامتر روم']);
+check('بدون پارامتر، روم session استفاده می‌شود', (int)$pdo->query("SELECT room_id FROM messages WHERE id = " . (int)($r['json']['data']['message_id'] ?? 0))->fetchColumn() === 10);
+check('عضو نبودن در روم 403 است', $ivy->api('GET', 'get_messages.php?room_id=11&last_id=0')['status'] === 403);
+check('ارسال به روم دیگران 403 است', $kate->api('POST', 'send_message.php', ['room_id' => 10, 'message' => 'x'])['status'] === 403);
+check('دسترسی به روم ناموجود 403 است', $ivy->api('GET', 'sync.php?room_id=999999')['status'] === 403);
+$r = $ivy->req('GET', 'chat.php?room=11');
+check('chat.php روم غیرمجاز را به روم مجاز می‌برد', strpos($r['body'], 'data-room-id="10"') !== false);
+
+section('همگام‌سازی رویدادها');
+$cursor = (int)$ivy->api('GET', 'get_messages.php?last_id=0')['json']['data']['cursor'];
+$kateCursor = (int)$kate->api('GET', 'get_messages.php?last_id=0')['json']['data']['cursor'];
+$r = $henry->api('POST', 'send_message.php', ['room_id' => 10, 'message' => 'SYNC-ORIGINAL']);
+$syncMsg = (int)$r['json']['data']['message_id'];
+$r = $ivy->api('GET', "sync.php?cursor=$cursor");
+check('پیام جدید با sync می‌رسد', strpos($r['body'], 'SYNC-ORIGINAL') !== false, $r['body']);
+check('sync بدون توکن رد می‌شود', $ivy->req('GET', "sync.php?cursor=$cursor")['status'] === 403);
+$cursor = (int)$r['json']['data']['cursor'];
+$henry->api('POST', 'edit_message.php', ['room_id' => 10, 'message_id' => $syncMsg, 'text' => 'SYNC-EDITED']);
+$r = $ivy->api('GET', "sync.php?cursor=$cursor");
+check('ویرایش به بقیه می‌رسد', strpos($r['body'], 'SYNC-EDITED') !== false && ($r['json']['data']['messages'][0]['is_edited'] ?? false) === true, $r['body']);
+$cursor = (int)$r['json']['data']['cursor'];
+$henry->api('POST', 'delete_message.php', ['room_id' => 10, 'message_id' => $syncMsg]);
+$r = $ivy->api('GET', "sync.php?cursor=$cursor");
+check('حذف به بقیه می‌رسد', in_array($syncMsg, $r['json']['data']['deleted_ids'] ?? [], true), $r['body']);
+check('متن پیام حذف‌شده در sync نیست', strpos($r['body'], 'SYNC-EDITED') === false);
+$r = $kate->api('GET', "sync.php?cursor=$kateCursor");
+check('رویداد روم دیگر به غیرعضو نمی‌رسد', strpos($r['body'], 'SYNC-') === false && ($r['json']['data']['messages'] ?? null) === []);
+$cursor = (int)$r['json']['data']['cursor'];
+$r = $kate->api('GET', "sync.php?cursor=$cursor");
+check('بدون تغییر، cursor جلو نمی‌رود', (int)$r['json']['data']['cursor'] === $cursor && !isset($r['json']['data']['rooms']));
+
+section('خوانده‌نشده و رسید');
+$unreadOf = function ($client, $roomId) {
+    foreach ($client->api('GET', 'get_messages.php?room_id=' . $roomId . '&last_id=999999999')['json']['data']['rooms'] ?? [] as $room) {
+        if ($room['id'] === $roomId) {
+            return $room;
+        }
+    }
+    return null;
+};
+$jackCursor = (int)$jack->api('GET', 'get_messages.php?last_id=0')['json']['data']['cursor'];
+$receiptMsg = (int)$henry->api('POST', 'send_message.php', ['room_id' => 10, 'message' => 'برای رسید'])['json']['data']['message_id'];
+check('پیام جدید خوانده‌نشده حساب می‌شود', ($unreadOf($ivy, 10)['unread'] ?? 0) > 0);
+$r = $henry->api('GET', 'get_messages.php?room_id=10&last_id=999999999');
+$receipts = array_column($r['json']['data']['receipts'] ?? [], null, 'user_id');
+check('قبل از رسیدن، تحویل نشده است', ($receipts[22]['delivered'] ?? 0) < $receiptMsg);
+$jack->api('GET', "sync.php?cursor=$jackCursor");
+$r = $henry->api('GET', 'get_messages.php?room_id=10&last_id=999999999');
+$receipts = array_column($r['json']['data']['receipts'] ?? [], null, 'user_id');
+check('دریافت با sync تحویل را ثبت می‌کند', ($receipts[22]['delivered'] ?? 0) >= $receiptMsg);
+check('تحویل به معنی خواندن نیست', ($receipts[22]['read'] ?? 0) < $receiptMsg);
+$r = $ivy->api('POST', 'mark_read.php', ['room_id' => 10, 'message_id' => $receiptMsg]);
+check('mark_read خوانده‌نشده را صفر می‌کند', ($r['json']['data']['rooms'][0]['unread'] ?? -1) === 0 || ($unreadOf($ivy, 10)['unread'] ?? 1) === 0, $r['body']);
+$r = $henry->api('GET', 'get_messages.php?room_id=10&last_id=999999999');
+$receipts = array_column($r['json']['data']['receipts'] ?? [], null, 'user_id');
+check('خواندن به فرستنده می‌رسد', ($receipts[21]['read'] ?? 0) >= $receiptMsg);
+$ivy->api('POST', 'mark_read.php', ['room_id' => 10, 'message_id' => 1]);
+check('نشانگر خواندن عقب نمی‌رود', (int)$pdo->query("SELECT last_read_message_id FROM users_rooms WHERE user_id=21 AND room_id=10")->fetchColumn() >= $receiptMsg);
+$ivy->api('POST', 'mark_read.php', ['room_id' => 10, 'message_id' => 2000000000]);
+check('نشانگر از آخرین پیام روم جلوتر نمی‌رود', (int)$pdo->query("SELECT last_read_message_id FROM users_rooms WHERE user_id=21 AND room_id=10")->fetchColumn() < 2000000000);
+check('mark_read روم دیگران ممنوع است', $ivy->api('POST', 'mark_read.php', ['room_id' => 11, 'message_id' => 1])['status'] === 403);
+
+section('پیام‌های قدیمی‌تر');
+$bulk = $pdo->prepare("INSERT INTO messages (room_id, user_id, message) VALUES (11, 20, ?)");
+for ($i = 1; $i <= 120; $i++) {
+    $bulk->execute(["OLD-$i"]);
+}
+$r = $henry->api('GET', 'get_messages.php?room_id=11&last_id=0');
+$page = $r['json']['data'];
+check('صفحه اول 50 پیام و has_older دارد', count($page['messages']) === 50 && $page['has_older'] === true);
+$r = $henry->api('GET', 'get_messages.php?room_id=11&last_id=0&before_id=' . $page['messages'][0]['id']);
+$older = $r['json']['data'];
+check('پیام‌های قدیمی‌تر بدون هم‌پوشانی می‌آیند', count($older['messages']) === 50 && end($older['messages'])['id'] < $page['messages'][0]['id']);
+$pivot = $older['messages'][10]['id'];
+$r = $henry->api('GET', "get_messages.php?room_id=11&last_id=0&around_id=$pivot");
+check('around_id پیام هدف را برمی‌گرداند', in_array($pivot, array_column($r['json']['data']['messages'], 'id'), true) && $r['json']['data']['has_newer'] === true);
+$r = $henry->api('GET', 'get_messages.php?room_id=10&last_id=0&before_id=' . $pivot);
+check('before_id از روم دیگر پیامی نمی‌آورد', strpos($r['body'], 'OLD-') === false);
+
+section('واکنش');
+$reactMsg = (int)$henry->api('POST', 'send_message.php', ['room_id' => 10, 'message' => 'برای واکنش'])['json']['data']['message_id'];
+check('ایموجی خارج از فهرست رد می‌شود', $ivy->api('POST', 'react_message.php', ['room_id' => 10, 'message_id' => $reactMsg, 'emoji' => '<b>'])['status'] === 400);
+$r = $ivy->api('POST', 'react_message.php', ['room_id' => 10, 'message_id' => $reactMsg, 'emoji' => '👍']);
+check('واکنش ثبت می‌شود', ($r['json']['data']['added'] ?? false) === true, $r['body']);
+$jack->api('POST', 'react_message.php', ['room_id' => 10, 'message_id' => $reactMsg, 'emoji' => '👍']);
+$messageById = function ($client, $roomId, $id) {
+    foreach ($client->api('GET', "get_messages.php?room_id=$roomId&last_id=" . ($id - 1))['json']['data']['messages'] ?? [] as $m) {
+        if ($m['id'] === $id) {
+            return $m;
+        }
+    }
+    return null;
+};
+$m = $messageById($ivy, 10, $reactMsg);
+check('شمارش و mine درست است', ($m['reactions'][0]['count'] ?? 0) === 2 && ($m['reactions'][0]['mine'] ?? false) === true && $m['reactions'][0]['emoji'] === '👍');
+$r = $ivy->api('POST', 'react_message.php', ['room_id' => 10, 'message_id' => $reactMsg, 'emoji' => '👍']);
+check('واکنش دوباره برداشته می‌شود', ($r['json']['data']['added'] ?? true) === false);
+check('واکنش روی پیام روم دیگر ممکن نیست', $ivy->api('POST', 'react_message.php', ['room_id' => 10, 'message_id' => $sideMsg, 'emoji' => '👍'])['status'] === 404);
+
+section('سنجاق');
+check('عضو عادی سنجاق نمی‌کند', $ivy->api('POST', 'pin_message.php', ['room_id' => 10, 'message_id' => $reactMsg])['status'] === 403);
+$r = $henry->api('POST', 'pin_message.php', ['room_id' => 10, 'message_id' => $reactMsg]);
+check('مدیر روم سنجاق می‌کند', ($r['json']['data']['pinned'] ?? false) === true, $r['body']);
+$r = $ivy->api('GET', 'get_messages.php?last_id=0');
+check('سنجاق به اعضا نمایش داده می‌شود', ($r['json']['data']['pinned'][0]['id'] ?? 0) === $reactMsg);
+$henry->api('POST', 'delete_message.php', ['room_id' => 10, 'message_id' => $reactMsg]);
+$r = $ivy->api('GET', 'get_messages.php?last_id=0');
+check('پیام حذف‌شده از سنجاق خارج می‌شود', ($r['json']['data']['pinned'] ?? [1]) === []);
+
+$pinEditMsg = (int)$henry->api('POST', 'send_message.php', ['room_id' => 10, 'message' => 'سنجاق قبل از ویرایش'])['json']['data']['message_id'];
+$henry->api('POST', 'pin_message.php', ['room_id' => 10, 'message_id' => $pinEditMsg]);
+$pinCursor = (int)$ivy->api('GET', 'get_messages.php?last_id=0')['json']['data']['cursor'];
+$henry->api('POST', 'edit_message.php', ['room_id' => 10, 'message_id' => $pinEditMsg, 'text' => 'سنجاق بعد از ویرایش']);
+$r = $ivy->api('GET', "sync.php?cursor=$pinCursor");
+check('ویرایش، متن نوار سنجاق را به‌روز می‌کند', ($r['json']['data']['pinned'][0]['text'] ?? '') === 'سنجاق بعد از ویرایش', $r['body']);
+$henry->api('POST', 'pin_message.php', ['room_id' => 10, 'message_id' => $pinEditMsg]);
+
+section('منشن');
+$r = $ivy->api('POST', 'send_message.php', ['message' => 'سلام @jack و @kate و @nobody email@jack.ir']);
+$mentionMsg = (int)$r['json']['data']['message_id'];
+$mentioned = $pdo->query("SELECT user_id FROM message_mentions WHERE message_id = $mentionMsg")->fetchAll(PDO::FETCH_COLUMN);
+check('فقط اعضای روم منشن می‌شوند', array_map('intval', $mentioned) === [22], implode(',', $mentioned));
+check('منشن در فهرست روم دیده می‌شود', ($unreadOf($jack, 10)['mentions'] ?? 0) === 1);
+check('پیام برای فرد منشن‌شده علامت دارد', ($messageById($jack, 10, $mentionMsg)['mentions_me'] ?? false) === true);
+check('برای دیگران علامت ندارد', ($messageById($henry, 10, $mentionMsg)['mentions_me'] ?? true) === false);
+$ivy->api('POST', 'edit_message.php', ['message_id' => $mentionMsg, 'text' => 'بدون منشن']);
+check('ویرایش، منشن را به‌روز می‌کند', ($unreadOf($jack, 10)['mentions'] ?? 1) === 0);
+$r = $ivy->api('GET', 'room_members.php');
+$usernames = array_column($r['json']['data']['members'] ?? [], 'username');
+check('پیشنهاد منشن فقط اعضای روم است', in_array('jack', $usernames, true) && !in_array('kate', $usernames, true) && !in_array('ivy', $usernames, true));
+check('فهرست اعضا هش رمز ندارد', strpos($r['body'], 'password') === false);
+
+section('جست‌وجو');
+$henry->api('POST', 'send_message.php', ['room_id' => 10, 'message' => 'کلمه‌ی جستجوپذیر یکتا 100%']);
+$r = $ivy->api('GET', 'search_messages.php?q=' . urlencode('جستجوپذیر'));
+check('جست‌وجوی فارسی کار می‌کند', count($r['json']['data']['results'] ?? []) === 1, $r['body']);
+$r = $ivy->api('GET', 'search_messages.php?q=' . urlencode('OLD-1'));
+check('پیام روم دیگر پیدا نمی‌شود', ($r['json']['data']['results'] ?? [1]) === []);
+$r = $henry->api('GET', 'search_messages.php?room_id=11&q=' . urlencode('OLD-11'));
+check('جست‌وجو در روم همان تب است', count($r['json']['data']['results'] ?? []) > 0);
+$r = $ivy->api('GET', 'search_messages.php?q=' . urlencode('%%'));
+check('% تحت‌اللفظی است', ($r['json']['data']['results'] ?? [1]) === []);
+check('عبارت کوتاه رد می‌شود', $ivy->api('GET', 'search_messages.php?q=a')['status'] === 400);
+check('عبارت آرایه‌ای خطای 500 نمی‌دهد', $ivy->api('GET', 'search_messages.php?q[]=abc')['status'] === 400);
+$r = $ivy->api('GET', 'search_messages.php?q=' . urlencode('SYNC-EDITED'));
+check('پیام حذف‌شده پیدا نمی‌شود', ($r['json']['data']['results'] ?? [1]) === []);
+
+section('گفتگوی خصوصی');
+$r = $ivy->api('GET', 'contacts.php');
+$contactIds = array_column($r['json']['data']['contacts'] ?? [], 'id');
+check('فقط هم‌روم‌ها در فهرست هستند', in_array(20, $contactIds, true) && in_array(22, $contactIds, true) && !in_array(23, $contactIds, true) && !in_array(21, $contactIds, true), implode(',', $contactIds));
+check('با غیر هم‌روم گفتگو شروع نمی‌شود', $ivy->api('POST', 'start_direct.php', ['user_id' => 23])['status'] === 404);
+check('با خود گفتگو شروع نمی‌شود', $ivy->api('POST', 'start_direct.php', ['user_id' => 21])['status'] === 404);
+check('کاربر ناموجود هم همان پاسخ را دارد', $ivy->api('POST', 'start_direct.php', ['user_id' => 987654])['status'] === 404);
+$r = $ivy->api('POST', 'start_direct.php', ['user_id' => 22]);
+$dmRoom = (int)($r['json']['data']['room_id'] ?? 0);
+check('گفتگو ساخته می‌شود', $dmRoom > 0 && $pdo->query("SELECT type FROM rooms WHERE id = $dmRoom")->fetchColumn() === 'direct', $r['body']);
+check('طرف مقابل به همان گفتگو می‌رسد', (int)($jack->api('POST', 'start_direct.php', ['user_id' => 21])['json']['data']['room_id'] ?? 0) === $dmRoom);
+$r = $ivy->api('POST', 'send_message.php', ['room_id' => $dmRoom, 'message' => 'پیام خصوصی']);
+$dmMsg = (int)$r['json']['data']['message_id'];
+$r = $jack->api('GET', "get_messages.php?room_id=$dmRoom&last_id=0");
+check('طرف مقابل پیام را می‌بیند', strpos($r['body'], 'پیام خصوصی') !== false);
+check('نوع روم به کلاینت می‌رسد', ($r['json']['data']['room_type'] ?? '') === 'direct');
+$names = array_column($r['json']['data']['rooms'] ?? [], 'name', 'id');
+check('نام گفتگو نام طرف مقابل است', ($names[$dmRoom] ?? '') === 'آیوی', json_encode($names, JSON_UNESCAPED_UNICODE));
+check('شخص سوم پیام خصوصی را نمی‌بیند', $henry->api('GET', "get_messages.php?room_id=$dmRoom&last_id=0")['status'] === 403);
+check('شخص سوم نمی‌تواند بفرستد', $henry->api('POST', 'send_message.php', ['room_id' => $dmRoom, 'message' => 'x'])['status'] === 403);
+check('طرف مقابل پیام را حذف نمی‌کند', $jack->api('POST', 'delete_message.php', ['room_id' => $dmRoom, 'message_id' => $dmMsg])['status'] === 403);
+check('هر دو طرف سنجاق می‌کنند', ($jack->api('POST', 'pin_message.php', ['room_id' => $dmRoom, 'message_id' => $dmMsg])['json']['data']['pinned'] ?? false) === true);
+$r = $a->req('GET', 'admin-rooms.php');
+check('گفتگوی خصوصی در پنل روم‌ها نیست', strpos($r['body'], 'direct:') === false);
+check('صفحه اعضای گفتگوی خصوصی در پنل باز نمی‌شود', $a->req('GET', "admin-room-members.php?id=$dmRoom")['status'] === 302);
+check('گفتگوی خصوصی در انتخاب روم ورود نیست', strpos($newClient()->login('ivy')['headers'], 'chat.php') !== false);
+
+section('صف آفلاین');
+$token = '11111111-2222-4333-8444-555555555555';
+$r1 = $ivy->api('POST', 'send_message.php', ['message' => 'تکرار نشود', 'client_token' => $token]);
+$r2 = $ivy->api('POST', 'send_message.php', ['message' => 'تکرار نشود', 'client_token' => $token]);
+check('ارسال دوباره از صف پیام تکراری نمی‌سازد', ($r1['json']['data']['message_id'] ?? 1) === ($r2['json']['data']['message_id'] ?? 2) && ($r2['json']['data']['duplicate'] ?? false) === true);
+check('فقط یک ردیف ثبت شده است', (int)$pdo->query("SELECT COUNT(*) FROM messages WHERE client_token = '$token'")->fetchColumn() === 1);
+$r3 = $jack->api('POST', 'send_message.php', ['message' => 'همان شناسه از کاربر دیگر', 'client_token' => $token]);
+check('شناسه هر کاربر جداست', ($r3['json']['data']['duplicate'] ?? false) === false && $r3['json']['data']['message_id'] !== $r1['json']['data']['message_id']);
+$r = $ivy->api('POST', 'send_message.php', ['message' => 'شناسه بد', 'client_token' => "'; DROP TABLE x"]);
+check('شناسه نامعتبر نادیده گرفته می‌شود', $r['status'] === 200);
+
+section('فایل و پیام صوتی');
+$tmp = "$work/voice.webm";
+file_put_contents($tmp, "\x1A\x45\xDF\xA3\x01\x00\x00\x00\x00\x00\x00\x1F\x42\x86\x81\x01\x42\xF7\x81\x01\x42\xF2\x81\x04\x42\xF3\x81\x08\x42\x82\x84webm\x42\x87\x81\x02\x42\x85\x81\x02" . str_repeat("\0", 2000));
+$r = $henry->api('POST', 'upload_file.php', ['room_id' => 10, 'file' => new CURLFile($tmp, 'video/webm', 'v.webm')]);
+check('ویدیو بدون حالت صوتی رد می‌شود', $r['status'] === 400, $r['body']);
+$r = $henry->api('POST', 'upload_file.php', ['room_id' => 10, 'kind' => 'voice', 'file' => new CURLFile($tmp, 'audio/webm', 'voice.webm')]);
+check('ضبط مرورگر به عنوان پیام صوتی ثبت می‌شود', $r['status'] === 200 && ($r['json']['data']['file_type'] ?? '') === 'voice', $r['body']);
+$voiceId = (int)($r['json']['data']['message_id'] ?? 0);
+check('نوع فایل به صوت تبدیل می‌شود', $pdo->query("SELECT file_mime FROM messages WHERE id = $voiceId")->fetchColumn() === 'audio/webm');
+$r = $ivy->req('GET', "download.php?id=$voiceId");
+check('پخش صوت با Content-Type صوتی است', stripos($r['headers'], 'Content-Type: audio/webm') !== false && stripos($r['headers'], 'Accept-Ranges: bytes') !== false);
+$r = $ivy->req('GET', "download.php?id=$voiceId", null, ['Range: bytes=0-9']);
+check('درخواست Range پاسخ 206 می‌دهد', $r['status'] === 206 && strlen($r['body']) === 10 && stripos($r['headers'], 'Content-Range: bytes 0-9/') !== false, (string)$r['status']);
+$r = $ivy->req('GET', "download.php?id=$voiceId", null, ['Range: bytes=-5']);
+check('Range از انتها کار می‌کند', $r['status'] === 206 && strlen($r['body']) === 5);
+$r = $ivy->req('GET', "download.php?id=$voiceId", null, ['Range: bytes=99999999-']);
+check('Range خارج از فایل 416 است', $r['status'] === 416, (string)$r['status']);
+check('عضو روم دوم هم از تب دیگر دانلود می‌کند', $henry->req('GET', "download.php?id=$voiceId")['status'] === 200);
+check('غیرعضو دانلود نمی‌کند', $kate->req('GET', "download.php?id=$voiceId")['status'] === 404);
+$m = $messageById($ivy, 10, $voiceId);
+check('فایل در پیام نمایش داده می‌شود', ($m['message_type'] ?? '') === 'voice' && ($m['file_url'] ?? '') === "download.php?id=$voiceId" && ($m['file_size'] ?? 0) > 0);
+check('مسیر واقعی فایل لو نمی‌رود', !isset($m['file_path']));
+
+section('لینک دعوت');
+$makeInvite = function ($room, $hours, $maxUses) use ($a, $adminToken) {
+    $a->req('POST', "admin-room-edit.php?id=$room", ['csrf_token' => $adminToken, 'action' => 'invite', 'expires_hours' => $hours, 'max_uses' => $maxUses]);
+    preg_match('/join\.php\?token=([a-f0-9]{64})/', $a->req('GET', "admin-room-edit.php?id=$room")['body'], $m);
+    return $m[1] ?? '';
+};
+$anonEdit = $newClient()->req('POST', 'admin-room-edit.php?id=10', ['action' => 'invite']);
+check('ساخت دعوت بدون ادمین ممکن نیست', $anonEdit['status'] === 302);
+$token1 = $makeInvite(10, 24, 1);
+check('لینک دعوت ساخته می‌شود', strlen($token1) === 64);
+check('توکن خام در دیتابیس نیست', (int)$pdo->query("SELECT COUNT(*) FROM room_invites WHERE token_hash = '$token1'")->fetchColumn() === 0);
+$r = $newClient()->req('GET', "join.php?token=$token1");
+check('بدون ورود نام روم نشان داده نمی‌شود', strpos($r['body'], 'TeamRoom') === false && $r['status'] === 302);
+$r = $kate->req('GET', "join.php?token=$token1");
+check('کاربر واردشده نام روم را می‌بیند', strpos($r['body'], 'TeamRoom') !== false);
+$r = $kate->req('POST', 'join.php', ['token' => $token1]);
+check('پیوستن بدون CSRF رد می‌شود', (int)$pdo->query("SELECT COUNT(*) FROM users_rooms WHERE user_id=23 AND room_id=10")->fetchColumn() === 0);
+preg_match('/name="csrf_token" value="([a-f0-9]+)"/', $kate->req('GET', "join.php?token=$token1")['body'], $m);
+$r = $kate->req('POST', 'join.php', ['token' => $token1, 'csrf_token' => $m[1]]);
+check('کاربر به روم می‌پیوندد', $r['status'] === 302 && (int)$pdo->query("SELECT COUNT(*) FROM users_rooms WHERE user_id=23 AND room_id=10")->fetchColumn() === 1);
+check('عضو جدید پیام‌های قبلی را خوانده‌نشده نمی‌بیند', ($unreadOf($kate, 10)['unread'] ?? 1) === 0);
+$r = $newClient();
+$r->login('mona');
+preg_match('/name="csrf_token" value="([a-f0-9]+)"/', $r->req('GET', 'change-password.php')['body'], $m);
+$r2 = $r->req('POST', 'join.php', ['token' => $token1, 'csrf_token' => $m[1]]);
+check('ظرفیت پرشده پذیرفته نمی‌شود', (int)$pdo->query("SELECT COUNT(*) FROM users_rooms WHERE user_id=25 AND room_id=10")->fetchColumn() === 0);
+$r = $a->req('GET', 'admin-room-edit.php?id=10');
+check('دعوت پرشده در پنل مصرف را نشان می‌دهد', strpos($r['body'], '1 از 1') !== false);
+$token2 = $makeInvite(10, 0, 0);
+$fresh = $newClient();
+$r = $fresh->req('GET', "join.php?token=$token2");
+check('بدون ورود به صفحه ورود می‌رود', strpos($r['headers'], 'login.php?invite=1') !== false);
+$r = $fresh->login('liam');
+check('پس از ورود مستقیم عضو می‌شود', (int)$pdo->query("SELECT COUNT(*) FROM users_rooms WHERE user_id=24 AND room_id=10")->fetchColumn() === 1);
+$r = $fresh->req('GET', 'chat.php');
+check('و همان روم باز می‌شود', strpos($r['body'], 'data-room-id="10"') !== false);
+$inviteId = (int)$pdo->query("SELECT MAX(id) FROM room_invites")->fetchColumn();
+$a->req('POST', 'admin-room-edit.php?id=10', ['csrf_token' => $adminToken, 'action' => 'revoke', 'invite_id' => $inviteId]);
+$r = $henry->req('GET', "join.php?token=$token2");
+check('دعوت باطل‌شده کار نمی‌کند', strpos($r['body'], 'معتبر نیست') !== false);
+$pdo->exec("INSERT INTO room_invites (room_id, token_hash, expires_at) VALUES (10, '" . hash('sha256', str_repeat('a', 64)) . "', DATE_SUB(NOW(), INTERVAL 1 HOUR))");
+$r = $henry->req('GET', 'join.php?token=' . str_repeat('a', 64));
+check('دعوت منقضی کار نمی‌کند', strpos($r['body'], 'معتبر نیست') !== false);
+$r = $henry->req('GET', 'join.php?token[]=x');
+check('توکن آرایه‌ای خطای 500 نمی‌دهد', $r['status'] === 200, (string)$r['status']);
+
+section('نگهداری پیام');
+$a->req('POST', 'admin-room-edit.php?id=12', ['csrf_token' => $adminToken, 'name' => 'RetentionRoom', 'description' => '', 'is_active' => '1', 'retention_days' => '7']);
+check('مدت نگهداری ذخیره می‌شود', (int)$pdo->query("SELECT retention_days FROM rooms WHERE id = 12")->fetchColumn() === 7);
+$a->req('POST', 'admin-room-edit.php?id=12', ['csrf_token' => $adminToken, 'name' => 'RetentionRoom', 'description' => '', 'is_active' => '1', 'retention_days' => '12345']);
+check('مقدار خارج از فهرست به پیش‌فرض برمی‌گردد', $pdo->query("SELECT retention_days FROM rooms WHERE id = 12")->fetchColumn() === null);
+$a->req('POST', 'admin-room-edit.php?id=12', ['csrf_token' => $adminToken, 'name' => 'RetentionRoom', 'description' => '', 'is_active' => '1', 'retention_days' => '7']);
+$oldFile = "$work/old.gif";
+file_put_contents($oldFile, file_get_contents("$work/polyglot.php"));
+$mona = $newClient();
+$mona->login('mona');
+$r = $mona->api('POST', 'upload_file.php', ['file' => new CURLFile($oldFile, 'image/gif', 'old.gif')]);
+$oldId = (int)($r['json']['data']['message_id'] ?? 0);
+$oldPath = $pdo->query("SELECT file_path FROM messages WHERE id = $oldId")->fetchColumn();
+$newId = (int)$mona->api('POST', 'send_message.php', ['message' => 'پیام تازه'])['json']['data']['message_id'];
+$softId = (int)$mona->api('POST', 'send_message.php', ['message' => 'حذف قدیمی'])['json']['data']['message_id'];
+$keepRoomMsg = (int)$henry->api('POST', 'send_message.php', ['room_id' => 10, 'message' => 'روم بدون نگهداری'])['json']['data']['message_id'];
+$pdo->exec("UPDATE messages SET created_at = DATE_SUB(NOW(), INTERVAL 10 DAY) WHERE id IN ($oldId, $keepRoomMsg)");
+$pdo->exec("UPDATE messages SET is_deleted = 1, deleted_at = DATE_SUB(NOW(), INTERVAL 40 DAY) WHERE id = $softId");
+$countMsg = function ($id) use ($pdo) {
+    return (int)$pdo->query("SELECT COUNT(*) FROM messages WHERE id = " . (int)$id)->fetchColumn();
+};
+$r = $runCli(['scripts/cleanup.php', '--dry-run']);
+check('dry-run چیزی پاک نمی‌کند', $r['exit'] === 0 && $countMsg($oldId) === 1 && is_file("$app/uploads/$oldPath") && strpos($r['out'], 'Would remove') !== false, $r['out']);
+$r = $runCli(['scripts/cleanup.php']);
+check('cleanup با کاربر محدود اجرا می‌شود', $r['exit'] === 0, $r['out']);
+check('پیام قدیمی‌تر از مدت روم پاک می‌شود', $countMsg($oldId) === 0);
+check('فایل آن هم از دیسک پاک می‌شود', !is_file("$app/uploads/$oldPath"));
+check('پیام تازه می‌ماند', $countMsg($newId) === 1);
+check('پیام حذف‌شده قدیمی پاک می‌شود', $countMsg($softId) === 0);
+check('روم بدون سیاست نگهداری دست نمی‌خورد', $countMsg($keepRoomMsg) === 1);
+
+section('PWA');
+foreach (['manifest.webmanifest', 'sw.js', 'offline.html', 'assets/images/icon-192.png', 'assets/images/icon-512.png', 'assets/css/chat.css'] as $path) {
+    check("$path سرو می‌شود", $newClient()->req('GET', $path)['status'] === 200);
+}
+$manifest = json_decode(file_get_contents("$root/manifest.webmanifest"), true);
+check('manifest معتبر و محلی است', is_array($manifest) && strpos(json_encode($manifest), 'http') === false);
+$sw = file_get_contents("$root/sw.js");
+foreach (['offline.html', 'assets/css/chat.css', 'assets/js/chat-app.js', 'assets/fonts/Vazirmatn-Regular.woff2'] as $file) {
+    check("$file در SW هست و وجود دارد", strpos($sw, "'$file'") !== false && is_file("$root/$file"));
+}
+check('SW هیچ پاسخ API را ذخیره نمی‌کند', strpos($sw, '.php') === false);
+$r = $ivy->req('GET', 'chat.php');
+check('CSP اجازه manifest و worker محلی را می‌دهد', stripos($r['headers'], "manifest-src 'self'") !== false && stripos($r['headers'], "worker-src 'self'") !== false);
+
 section('پشتیبان و بازیابی');
 $uploadedFile = $pdo->query("SELECT file_path FROM messages WHERE file_path IS NOT NULL AND is_deleted = 0 ORDER BY id DESC LIMIT 1")->fetchColumn();
 $backupDir = "$work/backups";

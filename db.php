@@ -50,6 +50,13 @@ class Database {
     }
 
     /**
+     * بستن اتصال؛ getDB بعدی اتصال تازه می‌سازد
+     */
+    public static function disconnect() {
+        self::$instance = null;
+    }
+    
+    /**
      * دریافت اتصال PDO
      * @return PDO
      */

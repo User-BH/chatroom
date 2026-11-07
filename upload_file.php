@@ -1,7 +1,7 @@
 <?php
 /**
- * API آپلود فایل
- * چت روم پیشرفته - نسخه 2.1
+ * API آپلود فایل و پیام صوتی
+ * چت روم پیشرفته - نسخه 3.0
  * سازگار با PHP 8.5
  */
 
@@ -27,7 +27,7 @@ if (!isset($_FILES['file']) || $_FILES['file']['error'] === UPLOAD_ERR_NO_FILE) 
 $file = $_FILES['file'];
 
 // بررسی فایل و تشخیص نوع واقعی از روی محتوا
-$inspection = inspectUploadedFile($file);
+$inspection = inspectUploadedFile($file, postString('kind') === 'voice');
 if ($inspection['error'] !== '') {
     jsonError($inspection['error']);
 }
@@ -75,12 +75,12 @@ try {
     }
     chmod($filePath, 0640);
 
-    // ذخیره پیام در دیتابیس
+    $db->beginTransaction();
+
     $stmt = $db->prepare("
         INSERT INTO messages (room_id, user_id, message, message_type, file_path, file_name, file_size, file_mime, created_at)
         VALUES (:room_id, :user_id, :message, :type, :path, :name, :size, :mime, NOW())
     ");
-
     $stmt->execute([
         ':room_id' => $roomId,
         ':user_id' => $userId,
@@ -91,8 +91,20 @@ try {
         ':size' => $file['size'],
         ':mime' => $inspection['mime']
     ]);
-
     $messageId = (int)$db->lastInsertId();
+
+    saveMessageMentions($messageId, $roomId, $caption);
+    recordRoomEvent($roomId, 'message_new', $messageId, $userId);
+
+    $stmt = $db->prepare("
+        UPDATE users_rooms
+        SET last_read_message_id = GREATEST(last_read_message_id, :id1),
+            last_delivered_message_id = GREATEST(last_delivered_message_id, :id2)
+        WHERE user_id = :user AND room_id = :room
+    ");
+    $stmt->execute([':id1' => $messageId, ':id2' => $messageId, ':user' => $userId, ':room' => $roomId]);
+
+    $db->commit();
 
     jsonSuccess([
         'message_id' => $messageId,
@@ -102,6 +114,9 @@ try {
     ], 'فایل آپلود شد');
 
 } catch (PDOException $e) {
+    if ($db->inTransaction()) {
+        $db->rollBack();
+    }
     // فایل بدون رکورد دیتابیس روی دیسک نماند
     if ($filePath !== null && is_file($filePath)) {
         unlink($filePath);

@@ -7,8 +7,12 @@ server {
     return 301 https://$host$request_uri;
 }
 
+# سقف کل اتصال‌های SSE؛ بیشتر از این پاسخ 503 می‌گیرد و کلاینت به polling برمی‌گردد
+limit_conn_zone $server_name zone=chatroom_sse:1m;
+
 server {
     listen 443 ssl;
+    http2 on;
     server_name chat.example.ir;
 
     # گواهی باید بدون اینترنت قابل تمدید باشد (CA داخلی یا گواهی بلندمدت)
@@ -44,12 +48,34 @@ server {
         deny all;
     }
 
+    # جریان SSE روی پول جدا و بدون بافر
+    location = /events.php {
+        limit_conn chatroom_sse 180;
+        limit_conn_status 503;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_param HTTPS $https if_not_empty;
+        fastcgi_buffering off;
+        fastcgi_read_timeout 40s;
+        fastcgi_pass unix:/run/php/chatroom-sse.sock;
+    }
+
     location ~ \.php$ {
         try_files $uri =404;
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         fastcgi_param HTTPS $https if_not_empty;
-        fastcgi_pass unix:/run/php/php8.5-fpm.sock;
+        fastcgi_pass unix:/run/php/chatroom.sock;
+    }
+
+    location = /manifest.webmanifest {
+        default_type application/manifest+json;
+    }
+
+    # نسخه جدید Service Worker باید فوراً دیده شود
+    location = /sw.js {
+        add_header Cache-Control "no-cache" always;
+        add_header X-Content-Type-Options "nosniff" always;
     }
 
     location / {

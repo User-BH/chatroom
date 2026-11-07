@@ -18,7 +18,7 @@ $stmt = $db->query("SELECT COUNT(*) as total FROM users WHERE is_active = 1");
 $stats['users'] = $stmt->fetch()['total'];
 
 // تعداد روم‌ها
-$stmt = $db->query("SELECT COUNT(*) as total FROM rooms WHERE is_active = 1");
+$stmt = $db->query("SELECT COUNT(*) as total FROM rooms WHERE is_active = 1 AND type = 'group'");
 $stats['rooms'] = $stmt->fetch()['total'];
 
 // تعداد پیام‌ها
@@ -49,6 +49,7 @@ $stmt = $db->query("
            (SELECT COUNT(*) FROM users_rooms WHERE room_id = r.id) as member_count,
            (SELECT COUNT(*) FROM messages WHERE room_id = r.id AND is_deleted = 0) as message_count
     FROM rooms r 
+    WHERE r.type = 'group'
     ORDER BY r.created_at DESC 
     LIMIT 10
 ");

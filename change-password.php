@@ -8,7 +8,7 @@
 require_once __DIR__ . '/functions.php';
 requireUserLogin();
 
-if (!getCurrentUserMembership()) {
+if (!isCurrentAccountValid()) {
     clearUserSession();
     redirect('login.php');
 }

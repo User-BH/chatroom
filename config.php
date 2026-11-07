@@ -102,6 +102,22 @@ define('UPLOAD_DAILY_QUOTA', chatroomConfig('UPLOAD_DAILY_QUOTA', 200 * 1024 * 1
 define('MAX_MESSAGE_LENGTH', 5000);
 define('MESSAGES_PER_PAGE', 50);
 define('MAX_NEW_MESSAGES_PER_POLL', 200);
+define('MAX_EVENTS_PER_SYNC', 200);
+define('MESSAGE_EDIT_WINDOW', 48 * 3600);
+// در روم بزرگ‌تر از این، رسید خوانده شدن غیرفعال است
+define('RECEIPT_ROOM_LIMIT', chatroomConfig('RECEIPT_ROOM_LIMIT', 50));
+// صفر یعنی پیام‌ها حذف خودکار نمی‌شوند؛ هر روم می‌تواند مقدار خودش را داشته باشد
+define('MESSAGE_RETENTION_DAYS', chatroomConfig('MESSAGE_RETENTION_DAYS', 0));
+define('DELETED_MESSAGE_PURGE_DAYS', chatroomConfig('DELETED_MESSAGE_PURGE_DAYS', 30));
+
+// ===================================================
+// تنظیمات SSE
+// ===================================================
+define('SSE_MAX_SECONDS', chatroomConfig('SSE_MAX_SECONDS', 25)); // عمر هر اتصال
+define('SSE_POLL_SECONDS', 1); // فاصله بررسی فایل سیگنال
+// با هر رویداد لمس می‌شود تا SSE بیکار به دیتابیس وصل نماند
+define('EVENT_SIGNAL_FILE', chatroomConfig('EVENT_SIGNAL_FILE', sys_get_temp_dir() . '/chatroom-events-' . md5(DB_NAME)));
+define('SSE_ONLINE_INTERVAL', 15); // فاصله به‌روزرسانی تعداد آنلاین‌ها
 
 // ===================================================
 // تنظیمات سایت
@@ -199,5 +215,6 @@ function getAllowedUploadTypes() {
         'audio/x-wav' => ['ext' => 'wav', 'type' => 'voice', 'inline' => true],
         'audio/ogg' => ['ext' => 'ogg', 'type' => 'voice', 'inline' => true],
         'audio/webm' => ['ext' => 'webm', 'type' => 'voice', 'inline' => true],
+        'audio/mp4' => ['ext' => 'm4a', 'type' => 'voice', 'inline' => true],
     ];
 }

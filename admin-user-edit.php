@@ -59,7 +59,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $stmt = $db->prepare("
     SELECT r.id, r.name, ur.role, ur.is_muted
     FROM users_rooms ur
-    JOIN rooms r ON r.id = ur.room_id
+    JOIN rooms r ON r.id = ur.room_id AND r.type = 'group'
     WHERE ur.user_id = :id
     ORDER BY r.name
 ");

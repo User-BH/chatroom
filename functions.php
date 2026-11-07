@@ -10,6 +10,7 @@
 
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/includes/chat.php';
 
 // هش ساختگی برای نام‌های کاربری ناموجود تا زمان پاسخ، وجود حساب را لو ندهد
 const DUMMY_PASSWORD_HASH = '$2y$12$fae45vreC3u6c1.VACgOauSqitf15ard7/g0qub7mHY0EzviIGnye';
@@ -275,6 +276,8 @@ function cleanupOldRecords() {
     $stmt->execute([':seconds' => 30 * 86400]);
     $stmt = $db->prepare("DELETE FROM security_logs WHERE created_at < DATE_SUB(NOW(), INTERVAL :seconds SECOND)");
     $stmt->execute([':seconds' => 90 * 86400]);
+    $stmt = $db->prepare("DELETE FROM room_events WHERE created_at < DATE_SUB(NOW(), INTERVAL :seconds SECOND)");
+    $stmt->execute([':seconds' => 7 * 86400]);
 }
 
 /**
@@ -521,7 +524,7 @@ function requireAdminLogin() {
  */
 function getActiveMembership($userId, $roomId) {
     $stmt = getDB()->prepare("
-        SELECT ur.role, ur.is_muted, ur.muted_until, u.session_version
+        SELECT ur.role, ur.is_muted, ur.muted_until, ur.last_read_message_id, r.type, u.session_version
         FROM users_rooms ur
         JOIN users u ON u.id = ur.user_id AND u.is_active = 1
         JOIN rooms r ON r.id = ur.room_id AND r.is_active = 1
@@ -536,15 +539,38 @@ function getActiveMembership($userId, $roomId) {
  * عضویت کاربر فعلی session؛ اگر رمز عبور عوض شده باشد این session دیگر معتبر نیست
  * @return array|null
  */
-function getCurrentUserMembership() {
+function getCurrentUserMembership($roomId = null) {
     if (!isUserLoggedIn()) {
         return null;
     }
-    $membership = getActiveMembership((int)$_SESSION['user_id'], (int)$_SESSION['room_id']);
+    $roomId = $roomId ?? (int)$_SESSION['room_id'];
+    $membership = getActiveMembership((int)$_SESSION['user_id'], (int)$roomId);
     if (!$membership || (int)$membership['session_version'] !== (int)($_SESSION['session_version'] ?? -1)) {
         return null;
     }
     return $membership;
+}
+
+/**
+ * آیا حساب کاربر فعلی هنوز فعال است و رمزش پس از این ورود عوض نشده؟
+ * @return bool
+ */
+function isCurrentAccountValid() {
+    if (!isset($_SESSION['user_id'])) {
+        return false;
+    }
+    $stmt = getDB()->prepare("SELECT session_version FROM users WHERE id = :id AND is_active = 1");
+    $stmt->execute([':id' => $_SESSION['user_id']]);
+    $version = $stmt->fetchColumn();
+    return $version !== false && (int)$version === (int)($_SESSION['session_version'] ?? -1);
+}
+
+/**
+ * روم درخواست؛ هر تب روم خودش را می‌فرستد تا تب‌های هم‌زمان با هم قاطی نشوند
+ * @return int
+ */
+function requestedRoomId() {
+    return validatePositiveInt($_POST['room_id'] ?? ($_GET['room_id'] ?? 0)) ?: (int)$_SESSION['room_id'];
 }
 
 /**
@@ -568,26 +594,35 @@ function isMembershipMuted($membership) {
  * @param int $rateWindow
  * @return array ['user_id', 'room_id', 'membership']
  */
-function requireChatApiAccess($method, $rateKey, $rateMax, $rateWindow = 60) {
+function requireChatApiAccess($method, $rateKey, $rateMax, $rateWindow = 60, $requireCsrf = true) {
     if ($_SERVER['REQUEST_METHOD'] !== $method) {
         jsonError('متد نامعتبر است.', 405);
     }
     if (!isUserLoggedIn()) {
         jsonError('لطفاً وارد شوید.', 401);
     }
-    if (!validateCSRFToken(requestCSRFToken())) {
+    if ($requireCsrf && !validateCSRFToken(requestCSRFToken())) {
         jsonError('توکن امنیتی نامعتبر است.', 403);
     }
 
     $userId = (int)$_SESSION['user_id'];
-    $roomId = (int)$_SESSION['room_id'];
-
+    $roomId = requestedRoomId();
+    
     if (!checkRateLimit($rateKey . '_' . $userId, $rateMax, $rateWindow)) {
         jsonError('تعداد درخواست‌ها بیش از حد مجاز است.', 429);
     }
 
-    $membership = getCurrentUserMembership();
+    if (!isCurrentAccountValid()) {
+        clearUserSession();
+        jsonError('لطفاً دوباره وارد شوید.', 401);
+    }
+    
+    $membership = getCurrentUserMembership($roomId);
     if (!$membership) {
+        // کاربر روم‌های دیگری هم دارد؛ فقط همین روم بسته است
+        if (getRoomList($userId)) {
+            jsonError('دسترسی شما به این روم وجود ندارد.', 403);
+        }
         clearUserSession();
         jsonError('دسترسی شما به این روم وجود ندارد.', 401);
     }
@@ -605,11 +640,34 @@ function getUserRooms($userId) {
         SELECT r.id, r.name
         FROM rooms r
         JOIN users_rooms ur ON ur.room_id = r.id
-        WHERE ur.user_id = :user_id AND r.is_active = 1
+        WHERE ur.user_id = :user_id AND r.is_active = 1 AND r.type = 'group'
         ORDER BY r.name
     ");
     $stmt->execute([':user_id' => $userId]);
     return $stmt->fetchAll();
+}
+
+/**
+ * کسانی که با کاربر حداقل یک روم گروهی فعال مشترک دارند
+ * @param int $userId
+ * @return array
+ */
+function getContacts($userId) {
+    $stmt = getDB()->prepare("
+        SELECT DISTINCT u.id, u.name, u.username
+        FROM users_rooms mine
+        JOIN rooms r ON r.id = mine.room_id AND r.is_active = 1 AND r.type = 'group'
+        JOIN users_rooms other ON other.room_id = mine.room_id AND other.user_id <> mine.user_id
+        JOIN users u ON u.id = other.user_id AND u.is_active = 1
+        WHERE mine.user_id = :user
+        ORDER BY u.name
+        LIMIT 500
+    ");
+    $stmt->execute([':user' => $userId]);
+    return array_map(function ($row) {
+        $row['id'] = (int)$row['id'];
+        return $row;
+    }, $stmt->fetchAll());
 }
 
 /**
@@ -842,7 +900,7 @@ function setSecurityHeaders() {
     if (PHP_SAPI === 'cli') {
         return;
     }
-    header("Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; media-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+    header("Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; media-src 'self'; manifest-src 'self'; worker-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
     header_remove('X-Powered-By');
     header('X-Content-Type-Options: nosniff');
     header('X-Frame-Options: DENY');
@@ -956,9 +1014,10 @@ function logSecurityEvent($action, $userId = null, $adminId = null, $details = n
 /**
  * بررسی فایل آپلود شده و تشخیص نوع واقعی آن از روی محتوا
  * @param mixed $file
+ * @param bool $isVoice ضبط مرورگر؛ فایل webm و mp4 فقط صوتی با این حالت پذیرفته می‌شود
  * @return array ['error' => string, 'mime' => string|null, 'info' => array|null]
  */
-function inspectUploadedFile($file) {
+function inspectUploadedFile($file, $isVoice = false) {
     $fail = function ($error) {
         return ['error' => $error, 'mime' => null, 'info' => null];
     };
@@ -980,7 +1039,12 @@ function inspectUploadedFile($file) {
     $finfo = new finfo(FILEINFO_MIME_TYPE);
     $mime = $finfo->file($file['tmp_name']);
     $allowed = getAllowedUploadTypes();
-
+    
+    // libmagic ظرف webm و mp4 را ویدیو تشخیص می‌دهد و ذخیره به صورت صوت است
+    if ($isVoice && in_array($mime, ['video/webm', 'video/mp4'], true)) {
+        $mime = str_replace('video/', 'audio/', $mime);
+    }
+    
     if (!isset($allowed[$mime])) {
         return $fail('نوع فایل مجاز نیست.');
     }

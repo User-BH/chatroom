@@ -9,6 +9,14 @@ if (PHP_SAPI !== 'cli') {
 }
 
 // ---------- کلاینت HTTP ----------
+/**
+ * ساعت یکنوا برای اندازه‌گیری زمان؛ ساعت سیستم در VM می‌تواند جلو و عقب بپرد
+ * @return float
+ */
+function monotonicSeconds() {
+    return hrtime(true) / 1e9;
+}
+
 class Client {
     private $jar;
     public function __construct($base, $work) {
@@ -16,6 +24,9 @@ class Client {
         $this->jar = tempnam($work, 'jar');
     }
     public $base;
+    public function jarPath() {
+        return $this->jar;
+    }
     public $csrf = '';
     public function req($method, $path, $data = null, $headers = [], $follow = false) {
         $c = curl_init($this->base . '/' . $path);

@@ -62,6 +62,10 @@ CREATE TABLE `rooms` (
     `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     `is_active` TINYINT(1) DEFAULT 1,
+    `type` ENUM('group', 'direct') NOT NULL DEFAULT 'group',
+    `direct_key` VARCHAR(32) DEFAULT NULL,
+    `retention_days` INT UNSIGNED DEFAULT NULL,
+    UNIQUE KEY `uq_direct_key` (`direct_key`),
     INDEX `idx_name` (`name`),
     INDEX `idx_is_active` (`is_active`),
     FOREIGN KEY (`created_by`) REFERENCES `admins`(`id`) ON DELETE SET NULL
@@ -78,6 +82,8 @@ CREATE TABLE `users_rooms` (
     `role` ENUM('member', 'moderator', 'admin') DEFAULT 'member',
     `is_muted` TINYINT(1) DEFAULT 0,
     `muted_until` TIMESTAMP NULL,
+    `last_read_message_id` INT UNSIGNED NOT NULL DEFAULT 0,
+    `last_delivered_message_id` INT UNSIGNED NOT NULL DEFAULT 0,
     UNIQUE KEY `unique_user_room` (`user_id`, `room_id`),
     INDEX `idx_user_id` (`user_id`),
     INDEX `idx_room_id` (`room_id`),
@@ -104,6 +110,11 @@ CREATE TABLE `messages` (
     `is_deleted` TINYINT(1) DEFAULT 0,
     `deleted_at` TIMESTAMP NULL,
     `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    `client_token` CHAR(36) DEFAULT NULL,
+    `pinned_at` TIMESTAMP NULL DEFAULT NULL,
+    `pinned_by` INT UNSIGNED DEFAULT NULL,
+    UNIQUE KEY `uq_user_client_token` (`user_id`, `client_token`),
+    INDEX `idx_room_pinned` (`room_id`, `pinned_at`),
     INDEX `idx_room_id` (`room_id`),
     INDEX `idx_room_message` (`room_id`, `id`),
     INDEX `idx_user_id` (`user_id`),
@@ -116,16 +127,52 @@ CREATE TABLE `messages` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ===================================================
--- جدول وضعیت خوانده شدن پیام‌ها
+-- فید رویداد، واکنش، منشن و دعوت
 -- ===================================================
-CREATE TABLE `message_reads` (
-    `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+CREATE TABLE `room_events` (
+    `id` BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `room_id` INT UNSIGNED NOT NULL,
+    `type` ENUM('message_new', 'message_edit', 'message_delete', 'reaction', 'pin', 'receipt') NOT NULL,
+    `message_id` INT UNSIGNED DEFAULT NULL,
+    `actor_id` INT UNSIGNED DEFAULT NULL,
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX `idx_room_event` (`room_id`, `id`),
+    INDEX `idx_created_at` (`created_at`),
+    FOREIGN KEY (`room_id`) REFERENCES `rooms`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE `message_reactions` (
     `message_id` INT UNSIGNED NOT NULL,
     `user_id` INT UNSIGNED NOT NULL,
-    `read_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY `unique_message_user` (`message_id`, `user_id`),
+    `emoji` VARCHAR(16) NOT NULL,
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`message_id`, `user_id`, `emoji`),
     FOREIGN KEY (`message_id`) REFERENCES `messages`(`id`) ON DELETE CASCADE,
     FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `message_mentions` (
+    `message_id` INT UNSIGNED NOT NULL,
+    `user_id` INT UNSIGNED NOT NULL,
+    PRIMARY KEY (`message_id`, `user_id`),
+    INDEX `idx_user_message` (`user_id`, `message_id`),
+    FOREIGN KEY (`message_id`) REFERENCES `messages`(`id`) ON DELETE CASCADE,
+    FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE `room_invites` (
+    `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `room_id` INT UNSIGNED NOT NULL,
+    `token_hash` CHAR(64) NOT NULL UNIQUE,
+    `created_by` INT UNSIGNED DEFAULT NULL,
+    `max_uses` INT UNSIGNED DEFAULT NULL,
+    `uses` INT UNSIGNED NOT NULL DEFAULT 0,
+    `expires_at` TIMESTAMP NULL DEFAULT NULL,
+    `revoked_at` TIMESTAMP NULL DEFAULT NULL,
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX `idx_room_id` (`room_id`),
+    FOREIGN KEY (`room_id`) REFERENCES `rooms`(`id`) ON DELETE CASCADE,
+    FOREIGN KEY (`created_by`) REFERENCES `admins`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ===================================================
@@ -187,7 +234,8 @@ CREATE TABLE `schema_migrations` (
 
 INSERT INTO `schema_migrations` (`name`) VALUES
 ('001_security_hardening.sql'),
-('002_session_version.sql');
+('002_session_version.sql'),
+('003_chat_features.sql');
 
 -- ادمین پیش‌فرض عمداً وجود ندارد. پس از نصب اجرا کنید:
 --   php scripts/admin-password.php YOUR_ADMIN_USERNAME

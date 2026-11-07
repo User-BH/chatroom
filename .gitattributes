@@ -1,4 +1,5 @@
 *.woff2 binary
+*.png binary
 
 # این‌ها وارد بسته انتشار نمی‌شوند
 /tests export-ignore

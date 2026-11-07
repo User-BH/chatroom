@@ -11,7 +11,7 @@ requireAdminLogin();
 $db = getDB();
 $roomId = validatePositiveInt($_GET['id'] ?? 0);
 
-$stmt = $db->prepare("SELECT id, name FROM rooms WHERE id = :id");
+$stmt = $db->prepare("SELECT id, name FROM rooms WHERE id = :id AND type = 'group'");
 $stmt->execute([':id' => $roomId ?: 0]);
 $room = $stmt->fetch();
 

@@ -29,7 +29,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $error = 'توضیحات نباید بیشتر از 2000 کاراکتر باشد.';
         } else {
             // بررسی تکراری نبودن نام
-            $stmt = $db->prepare("SELECT id FROM rooms WHERE name = :name");
+            $stmt = $db->prepare("SELECT id FROM rooms WHERE name = :name AND type = 'group'");
             $stmt->execute([':name' => $name]);
 
             if ($stmt->fetch()) {

@@ -1,0 +1,35 @@
+; پول‌های PHP-FPM برنامه
+; SSE پول جدا دارد چون هر اتصال باز یک worker را نگه می‌دارد. اگر مشترک بودند،
+; چند ده کاربر متصل همه workerها را می‌گرفتند و بقیه درخواست‌ها می‌ایستادند.
+; pm.max_children پول sse باید بیشتر یا مساوی limit_conn در پیکربندی Nginx باشد.
+
+[chatroom]
+user = www-data
+group = www-data
+listen = /run/php/chatroom.sock
+listen.owner = www-data
+listen.group = www-data
+pm = dynamic
+pm.max_children = 40
+pm.start_servers = 6
+pm.min_spare_servers = 3
+pm.max_spare_servers = 12
+pm.max_requests = 1000
+request_terminate_timeout = 60s
+
+[chatroom-sse]
+user = www-data
+group = www-data
+listen = /run/php/chatroom-sse.sock
+listen.owner = www-data
+listen.group = www-data
+; ondemand در هجوم اتصال worker را کند می‌سازد و کاربر چند ثانیه منتظر می‌ماند
+pm = dynamic
+pm.max_children = 200
+pm.start_servers = 30
+pm.min_spare_servers = 20
+pm.max_spare_servers = 60
+pm.max_spawn_rate = 64
+pm.max_requests = 500
+request_terminate_timeout = 60s
+php_admin_value[memory_limit] = 32M

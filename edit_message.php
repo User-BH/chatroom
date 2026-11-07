@@ -1,7 +1,7 @@
 <?php
 /**
  * API ویرایش پیام
- * چت روم پیشرفته - نسخه 2.1
+ * چت روم پیشرفته - نسخه 3.0
  * سازگار با PHP 8.5
  */
 
@@ -56,15 +56,17 @@ try {
         jsonError('فقط پیام‌های متنی قابل ویرایش هستند');
     }
 
-    // محدودیت زمانی ویرایش (48 ساعت)
-    $messageTime = strtotime($message['created_at']);
-    if (time() - $messageTime > 48 * 3600) {
+    // محدودیت زمانی ویرایش
+    if (time() - strtotime($message['created_at']) > MESSAGE_EDIT_WINDOW) {
         jsonError('پیام‌های قدیمی‌تر از 48 ساعت قابل ویرایش نیستند');
     }
 
-    // ویرایش پیام
+    $db->beginTransaction();
     $stmt = $db->prepare("UPDATE messages SET message = :text, is_edited = 1, edited_at = NOW() WHERE id = :id AND room_id = :room_id");
     $stmt->execute([':text' => $newText, ':id' => $messageId, ':room_id' => $roomId]);
+    saveMessageMentions($messageId, $roomId, $newText);
+    recordRoomEvent($roomId, 'message_edit', $messageId, $userId);
+    $db->commit();
 
     jsonSuccess([
         'message_id' => $messageId,
@@ -72,6 +74,9 @@ try {
     ], 'پیام ویرایش شد');
 
 } catch (PDOException $e) {
+    if ($db->inTransaction()) {
+        $db->rollBack();
+    }
     error_log("Edit message error: " . $e->getMessage());
     jsonError('خطا در ویرایش پیام', 500);
 }
